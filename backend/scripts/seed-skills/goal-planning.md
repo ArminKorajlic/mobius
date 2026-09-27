@@ -45,7 +45,7 @@ running and ready tasks, so there is no separate read. With no arguments it
 returns the full plan.
 
 Statuses are pending, running, completed, blocked, failed, and cancelled; a
-note holds up to 500 characters and a result up to 1000. Work deepest leaves.
+note or result holds up to 1000 characters. Work deepest leaves.
 Children inherit ancestor dependencies and make a parent **Ready to verify**,
 not complete. Verify upward; cancelled prerequisites are settled. Plans may
 change; outcomes may not. Settled tasks do not close the Goal. To work on a

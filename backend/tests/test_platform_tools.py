@@ -1028,3 +1028,18 @@ def test_screenshot_in_a_read_only_sandbox_says_why_it_cannot_capture(monkeypatc
 
   assert result["isError"] is True
   assert "needs write access" in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize(("body", "reason"), [
+  ('{"detail":{"code":"invalid_plan","message":"note for a must be at most 1000 characters","task_id":"a"}}',
+   "note for a must be at most 1000 characters"),
+  ('{"detail":"A recipient is not an addressable Möbius peer."}',
+   "A recipient is not an addressable Möbius peer."),
+  ('{"detail":[{"loc":["body","tasks",0,"id"],"msg":"Field required"}]}',
+   "tasks 0 id: Field required"),
+  ("<html>Bad Gateway</html>", "<html>Bad Gateway</html>"),
+])
+def test_refusals_read_as_their_reason_not_the_wire_envelope(body, reason):
+  control = _control_module()
+  assert control._refusal_message(body) == reason
+  assert "{" not in control._refusal_message(body) or body.startswith("<")
