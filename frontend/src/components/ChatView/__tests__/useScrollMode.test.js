@@ -46,6 +46,7 @@ import {
   readerScrollEscapeDirection,
   settledPinMode,
   shouldPinSend,
+  resizeReappliesMode,
 } from '../scroll/policy.js'
 import { _scrollModeForDiagnostics } from '../useScrollMode.js'
 import {
@@ -2536,6 +2537,13 @@ test('durable queue anchors lose submission authority and cannot restore off-con
   assert.equal(offContent.submissionLayoutHold, undefined)
 })
 
+test('a resize driven by the inline answer editor never follows the live tail', () => {
+  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM', { editorResized: true }), false)
+  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM', { editorResized: false }), true)
+  assert.equal(resizeReappliesMode('FOLLOW_BOTTOM'), true)
+  // A hidden anchor restore is not reader typing; it re-applies regardless.
+  assert.equal(resizeReappliesMode('ANCHOR_AT', { editorResized: true }), true)
+})
 
 // Reading-position handoff: a settled anchor must not outlive a viewport the
 // reader moved without an owned gesture (momentum after the settle edge).

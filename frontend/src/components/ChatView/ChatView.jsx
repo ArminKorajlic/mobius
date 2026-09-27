@@ -19,6 +19,7 @@ import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { Chat, Flag } from '@openai/apps-sdk-ui/components/Icon'
 import { api, apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
+import { sharedRuntimeRead } from './runtimeReads.js'
 import {
   chatMessagesQueryKey,
   chatQueries,
@@ -263,6 +264,7 @@ import './ChatView.css'
 
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
+
 const MESSAGE_META_VISIBLE_MS = 5000
 // The floating jump-to-latest control is driven by follow-state plus physical
 // tail distance. Reserved reply room remains part of that range, so an upward
@@ -415,6 +417,10 @@ export default function ChatView({
 }) {
   const queryClient = useQueryClient()
   const provisionalNewChat = !!newChatSession && !newChatSession.materialized
+  // A provisional New Chat has no server row until its create commits, so it
+  // has no transcript or runtime to read.
+  const provisionalNewChatRef = useRef(provisionalNewChat)
+  provisionalNewChatRef.current = provisionalNewChat
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
   // A drawer search may target a ChatView that is already mounted. Subscribe
@@ -1391,6 +1397,7 @@ export default function ChatView({
     // attaches the live stream (see settleRuntime). Like a superseded read,
     // this is not the ambiguous `null` that callers may attach on.
     if (!activationSettledRef.current) return
+    if (provisionalNewChatRef.current) return
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
@@ -1589,14 +1596,15 @@ export default function ChatView({
   // until some unrelated local event (like focusing the composer) causes a
   // refresh. While a turn or visible queue exists, poll the small chat state
   // payload and hydrate only runtime fields — do not replace the transcript.
-  const refreshRuntimeState = useCallback(async () => {
+  const refreshRuntimeState = useCallback(async ({ shared = false } = {}) => {
+    if (provisionalNewChatRef.current) return null
     const gen = fetchGenRef.current
     try {
-      const res = await apiFetch(
-        `/chats/${chatId}/runtime`,
-        { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+      const read = () => (
+        apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+          .then(res => jsonOrThrow(res, 'Runtime refresh failed'))
       )
-      const data = await jsonOrThrow(res, 'Runtime refresh failed')
+      const data = await (shared ? sharedRuntimeRead(chatId, read) : read())
       if (chatIdStaleRef.current) return null
       // A running status alone must not attach a stream over a transcript that
       // never loaded; a resumed reply would then look like the whole chat.
@@ -1755,16 +1763,24 @@ export default function ChatView({
     setGoalPresentationLocalState,
   ])
 
-  // Every runtime reader shares the same bounded request for this chat/view
-  // generation. An old view's completion must not release a successor read.
-  const reconcileRuntimeState = useCallback(() => {
+  // Every runtime reader in this view shares one read-and-apply per
+  // generation; an old view's completion must not release a successor read.
+  // Background refreshes (`shared`) also share the network read across views
+  // of the same chat (runtimeReads.js). A caller that just wrote (a steer, a
+  // run signal) reads fresh and never joins a shared read that may predate
+  // its write.
+  const reconcileRuntimeState = useCallback(({ shared = false } = {}) => {
     const generation = fetchGenRef.current
     const current = runtimeReconcileRef.current
-    if (current?.chatId === chatId && current.generation === generation) {
+    if (
+      current?.chatId === chatId
+      && current.generation === generation
+      && (shared || !current.shared)
+    ) {
       return current.promise
     }
-    const owner = { chatId, generation }
-    owner.promise = refreshRuntimeState().finally(() => {
+    const owner = { chatId, generation, shared }
+    owner.promise = refreshRuntimeState({ shared }).finally(() => {
       if (runtimeReconcileRef.current === owner) runtimeReconcileRef.current = null
     })
     runtimeReconcileRef.current = owner
@@ -5114,7 +5130,7 @@ export default function ChatView({
     let cancelled = false
     const run = () => {
       if (cancelled) return
-      reconcileRuntimeState()
+      reconcileRuntimeState({ shared: true })
         .then(runtime => {
           if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
         })
@@ -5158,7 +5174,7 @@ export default function ChatView({
         return
       }
       void reconcileFailedSendOutbox({ authoritative: false })
-      reconcileRuntimeState().then(runtime => {
+      reconcileRuntimeState({ shared: true }).then(runtime => {
         if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
       })
     }
