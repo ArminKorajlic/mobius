@@ -5,6 +5,7 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -316,9 +317,19 @@ async def lifespan(app):
       )
     record_memory_checkpoint("startup_ready")
     supervisors.reclaim_boot_file_cache()
+  from app import app_setup
+  # Like cron mutation, restoration never runs inside the test runtime (its
+  # readiness probe would reach other tests' HTTP doubles); its own tests
+  # drive the runner directly.
+  setup_task = app_setup.start() if (
+    database_boot.serviceable and os.environ.get("MOBIUS_TEST_RUNTIME") != "1"
+  ) else None
   try:
     yield
   finally:
+    if setup_task is not None:
+      setup_task.cancel()
+      await asyncio.gather(setup_task, return_exceptions=True)
     record_memory_checkpoint("shutdown_begin")
     try:
       from app.public_app_transport import close_public_fetch_clients
