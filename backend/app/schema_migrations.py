@@ -5690,6 +5690,39 @@ def _add_note_recovery_attempted(eng) -> None:
     conn.execute(text(
       "ALTER TABLE chat_runs ADD COLUMN note_recovery_attempted BOOLEAN NOT NULL DEFAULT 0"
     ))
+def _add_agent_write_journal(eng) -> None:
+  """Add empty shared write-delivery records without changing chat history."""
+  from sqlalchemy import text
+  with eng.begin() as conn:
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS agent_write_streams (
+        run_id VARCHAR(64) NOT NULL PRIMARY KEY REFERENCES chat_runs(id) ON DELETE CASCADE,
+        chat_id VARCHAR(64) NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        sealed BOOLEAN NOT NULL, accepted_count INTEGER NOT NULL,
+        accepted_bytes INTEGER NOT NULL, diagnostics JSON NOT NULL,
+        item_receipts JSON NOT NULL, failure_delivered_by VARCHAR(64)
+      )
+    """))
+    conn.execute(text("""
+      CREATE TABLE IF NOT EXISTS agent_write_intents (
+        root_run_id VARCHAR(64) NOT NULL, operation_id VARCHAR(100) NOT NULL,
+        chat_id VARCHAR(64) NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+        source_run_id VARCHAR(64) NOT NULL REFERENCES chat_runs(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL, item_id VARCHAR(256) NOT NULL,
+        item_fingerprint VARCHAR(64) NOT NULL, tool VARCHAR(100) NOT NULL,
+        arguments_json TEXT NOT NULL, status VARCHAR(16) NOT NULL,
+        stage VARCHAR(32) NOT NULL, reason VARCHAR(500),
+        created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,
+        PRIMARY KEY (root_run_id, operation_id)
+      )
+    """))
+    for statement in (
+      "CREATE INDEX IF NOT EXISTS ix_agent_write_streams_chat_id ON agent_write_streams(chat_id)",
+      "CREATE INDEX IF NOT EXISTS ix_agent_write_intents_chat_id ON agent_write_intents(chat_id)",
+      "CREATE INDEX IF NOT EXISTS ix_agent_write_run_order ON agent_write_intents(source_run_id,status,ordinal)",
+      "CREATE INDEX IF NOT EXISTS ix_agent_write_item ON agent_write_intents(source_run_id,item_id)",
+    ):
+      conn.execute(text(statement))
 
 
 def _add_chat_run_browser_lineage(eng) -> None:
@@ -5835,6 +5868,7 @@ _SCHEMA_MIGRATIONS = (
   ("0078_browser_access_tables", _add_browser_access_tables),
   ("0079_chat_run_browser_lineage", _add_chat_run_browser_lineage),
   ("0080_embed_browser_lineage", _add_embed_browser_lineage),
+  ("0078_agent_write_journal", _add_agent_write_journal),
 )
 
 
