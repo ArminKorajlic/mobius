@@ -5565,6 +5565,40 @@ def _add_notification_seen_at(eng) -> None:
     conn.execute(text("UPDATE notifications SET seen_at = sent_at WHERE seen_at IS NULL"))
 
 
+def _add_chat_archive(eng) -> None:
+  """Add owner chat archiving (models.Chat.archived_at) to the drawer index.
+
+  Nullable with no backfill: every existing chat stays in Recents. The drawer
+  list projects the new column, so SQLite's covering index is replaced under a
+  new name (``CREATE INDEX IF NOT EXISTS`` matches names only, so reusing
+  ``ix_chats_drawer`` would silently keep the old column set).
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  with eng.begin() as conn:
+    if "archived_at" not in columns:
+      conn.execute(text("ALTER TABLE chats ADD COLUMN archived_at DATETIME NULL"))
+      columns.add("archived_at")
+    if eng.dialect.name != "sqlite":
+      return
+    covered = (
+      "deleted_at", "id", "title", "updated_at", "activity_at", "pinned_at",
+      "archived_at", "created_by_app_id", "has_messages", "pending_question_id",
+      "project_id", "agent_settings_json",
+    )
+    if not set(covered) <= columns:
+      return
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chats_drawer_v2 "
+      f"ON chats ({', '.join(covered)})"
+    ))
+    conn.execute(text("DROP INDEX IF EXISTS ix_chats_drawer"))
+
+
 def _allow_chat_owned_delegations(eng) -> None:
   """Allow core helpers without inventing an installed app.
 
@@ -5729,6 +5763,7 @@ _SCHEMA_MIGRATIONS = (
   ("0074_chat_owned_delegations", _allow_chat_owned_delegations),
   ("0075_notification_seen_at", _add_notification_seen_at),
   ("0076_legacy_helper_interruption", _add_legacy_helper_interruption),
+  ("0077_chat_archive", _add_chat_archive),
 )
 
 

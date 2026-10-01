@@ -1779,6 +1779,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0074_chat_owned_delegations",
     "0075_notification_seen_at",
     "0076_legacy_helper_interruption",
+    "0077_chat_archive",
   ]
   assert second == first
 
