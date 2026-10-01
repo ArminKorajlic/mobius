@@ -137,7 +137,9 @@ test('context compaction is a provider-neutral accessible timeline marker', () =
 
 test('message references are an accessible lazy disclosure with safe links', () => {
   const source = read('../MessageSources.jsx')
-  const msgContent = read('../MsgContent.jsx')
+  const sourceRead = read('../hooks/useMessageSources.js')
+  const sourcePaths = read('../messageSources.js')
+  const reply = read('../AssistantReply.jsx')
   const css = read('../ChatView.css')
   const favicon = read('../SourceFavicon.jsx')
 
@@ -145,18 +147,18 @@ test('message references are an accessible lazy disclosure with safe links', () 
   assert.match(source, /aria-expanded=\{open\}/)
   assert.match(source, /aria-controls=\{bodyId\}/)
   assert.match(source, /hidden=\{!open\}/)
-  assert.match(source, /\{open && loadedSources !== null && \(/,
+  assert.match(source, /\{open && sources\.length > 0 && \(/,
     'reference links and favicons must not mount while collapsed')
-  assert.match(source, /message-sources.*message_index=/s,
+  assert.match(sourcePaths, /message-sources.*message_index=/s,
     'historical metadata should have a dedicated lazy read path')
-  assert.match(source, /if \(!open \|\| loadedSources !== null/,
+  assert.match(sourceRead, /if \(!open\) return undefined/,
     'the metadata read must not begin before expansion')
   assert.match(source,
     /<ul className="chat__sources-list" aria-label="References for this answer">/)
-  assert.match(msgContent,
-    /msg\.role === 'assistant' && !isStreaming && \(\s*<MessageSources/,
-    'the collapsed reference row should appear only after the answer settles')
-  assert.match(msgContent, /sourceRef=\{msg\.source_ref\}/)
+  assert.match(reply, /!isStreaming && <MessageSources/,
+    'the collapsed reference row should appear only after the whole reply settles')
+  assert.match(reply, /refs=\{sourceRows\.flatMap/,
+    'the reply must pass original indices from every source row, including folded rows')
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
   assert.doesNotMatch(source, /source\.snippet|chat__source-snippet|chat__source-rank/,

@@ -17,7 +17,6 @@ import { foldAppActivityOperations } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
 import { isDurableRestartOffer } from './restartCard.js'
 import SecureInputCard from './SecureInputCard.jsx'
-import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import ContinuationCard from './ContinuationCard.jsx'
@@ -398,10 +397,10 @@ function MsgContentInner({
             data-assistant-markdown-block={msg.role === 'assistant' ? i : undefined}
           >
             {msg.role === 'assistant'
-              ? (isActiveAnswer
+              ? (isActiveAnswer || block.reply_text_owner
                   ? <ProgressiveMarkdown
                       text={text}
-                      isStreaming={isStreaming && i === lastEntryIdx}
+                      isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
                       onInternalNav={onInternalNav}
                       mediaDimensions={msg.media_dimensions}
                     />
@@ -653,17 +652,8 @@ function MsgContentInner({
           }
           return [...before, renderBlock(node.single.item, node.single.idx)]
         })}
+        {/* The final attachment owns each deliverable, before any terminal question. */}
         {beforeQuestionNode < 0 && fileAttachments}
-        {/* Web sources collected from the turn's tool blocks and shown once
-            after the answer. Memory keeps its own richer lookup card inline. */}
-        {msg.role === 'assistant' && !isStreaming && (
-          <MessageSources
-            blocks={msg.blocks}
-            chatId={chatId}
-            sourceRef={msg.source_ref}
-            disclosureKey={`${messageKey}:references`}
-          />
-        )}
         {!isStreaming && <GoalHistory msg={msg} />}
         {!isStreaming && <StoppedWaits msg={msg} />}
       </AssistantCopySurface>

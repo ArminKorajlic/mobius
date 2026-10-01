@@ -201,6 +201,13 @@
 
 /* ── Empty state ───────────────────────────────────── */
 
+/* A reply is one conversation item; source rows keep their anchors and
+   compact block spacing without cancelling the surrounding conversation gap. */
+.chat__reply-rows { list-style: none; padding: 0; margin: 0; }
+.chat__reply-rows > .chat__msg + .chat__msg:not(:has(> .chat__assistant-copy-surface:empty)) {
+  margin-top: 8px;
+}
+
 .chat__empty {
   display: flex;
   flex-direction: column;

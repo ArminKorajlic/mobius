@@ -27,8 +27,8 @@ const { default: DocumentAttachment, markdownCardExcerpt } = await vite.ssrLoadM
   '/src/components/ChatView/DocumentAttachment.jsx',
 )
 
-const { default: ActiveAssistantSurface } = await vite.ssrLoadModule(
-  '/src/components/ChatView/ActiveAssistantSurface.jsx',
+const { default: AssistantReply } = await vite.ssrLoadModule(
+  '/src/components/ChatView/AssistantReply.jsx',
 )
 
 after(() => vite.close())
@@ -268,7 +268,8 @@ for (const isStreaming of [true, false]) {
       type: 'tool', tool: 'PeerMessage', tool_use_id: 'peer-review',
       status: 'done', input: '', output: '',
     }
-    const html = renderToStaticMarkup(createElement(ActiveAssistantSurface, {
+    const html = renderToStaticMarkup(createElement(AssistantReply, {
+      replyGroup: { rows: [{ message: generatedMessage, key: 'assistant-file', anchorKey: 'assistant-file', notes: [] }] },
       activeMirrorMsg: { ...generatedMessage, blocks: [peer, ...rawBlocks] },
       activitySourceBlocks: rawBlocks,
       useDbActivePayload: false,
@@ -276,7 +277,7 @@ for (const isStreaming of [true, false]) {
       streamItems: [{
         type: 'tool', tool: 'Bash', tool_use_id: 'tool-pdf', status: 'done',
       }],
-      chatId: 'chat-generated-file', dataKey: 'assistant-file', isStreaming,
+      chatId: 'chat-generated-file', isStreaming,
     }))
     assert.match(html, /Exchang(?:ing|ed) messages/i)
     assert.equal(html.includes('chat__attach-file'), !isStreaming)
