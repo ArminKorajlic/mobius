@@ -143,8 +143,11 @@ DECLARE_WAIT_DESCRIPTION = (
   "use a wait for an approval or anything only the owner can do; show the "
   "real question card. Something must actually be advancing the condition: "
   "internal work needs an acknowledged durable executor first. Give exactly "
-  "one of command or delay_secs. Prefer a command when readiness is "
-  "observable; use a timer when elapsed time is the condition or no safe "
+  "one of github_checks, command or delay_secs. Prefer github_checks for a "
+  "published pull request at an exact head: it follows the checks GitHub "
+  "shows on the pull request (manual workflow dispatches on the same commit "
+  "are not included) without shell scripting. Prefer a command when readiness is observable in "
+  "other ways; use a timer when elapsed time is the condition or no safe "
   "read-only check is available. A command is a read-only check: exit 0 "
   "means met, silent exit 1 means not yet, anything else wakes the chat as a "
   "failed check. It does not inherit turn-only API credentials or "
@@ -244,6 +247,7 @@ def _declare_wait(
   delay_secs: int | None = None,
   interval_secs: int | None = None,
   deadline_secs: int | None = None,
+  github_checks: dict | None = None,
 ) -> dict:
   try:
     return _WAITS.declare_wait(
@@ -253,6 +257,7 @@ def _declare_wait(
       delay_secs=delay_secs,
       interval_secs=interval_secs,
       deadline_secs=deadline_secs,
+      github_checks=github_checks,
     )
   except SystemExit as exc:
     raise RuntimeError(str(exc)) from exc
@@ -607,7 +612,7 @@ def _optional_int(arguments: dict[str, Any], name: str) -> int | None:
 def _call_declare_wait(arguments: dict[str, Any]) -> dict:
   allowed = {
     "description", "condition_owner", "command", "delay_secs", "interval_secs",
-    "deadline_secs",
+    "deadline_secs", "github_checks",
   }
   if not set(arguments).issubset(allowed):
     raise ValueError("declare_wait received unknown arguments")
@@ -624,6 +629,8 @@ def _call_declare_wait(arguments: dict[str, Any]) -> dict:
     raise ValueError("command waits need a condition_owner")
   if command and arguments.get("deadline_secs") is None:
     raise ValueError("command waits need an explicit deadline_secs")
+  if arguments.get("github_checks") is not None and not isinstance(arguments["github_checks"], dict):
+    raise ValueError("github_checks must be an object")
   return _declare_wait(
     description.strip(),
     command=command,
@@ -633,6 +640,7 @@ def _call_declare_wait(arguments: dict[str, Any]) -> dict:
     delay_secs=_optional_int(arguments, "delay_secs"),
     interval_secs=_optional_int(arguments, "interval_secs"),
     deadline_secs=_optional_int(arguments, "deadline_secs"),
+    github_checks=arguments.get("github_checks"),
   )
 
 
@@ -1633,6 +1641,17 @@ _TOOL_DEFINITIONS = {
             "the partner can act, use a question card instead of this tool."
           ),
         },
+        "github_checks": {
+          "type": "object",
+          "description": "Wait for the checks GitHub shows on one published pull-request head to finish (finished does not mean passed; manual workflow dispatches on the same commit are not included).",
+          "properties": {
+            "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "maxLength": 200},
+            "pull_request": {"type": "integer", "minimum": 1},
+            "head_sha": {"type": "string", "pattern": "^[a-fA-F0-9]{7,40}$"},
+          },
+          "required": ["repository", "pull_request", "head_sha"],
+          "additionalProperties": False,
+        },
         "command": {
           "type": "string", "maxLength": 4000,
           "description": "Read-only shell check with 0/1/error exit semantics.",
@@ -1649,7 +1668,7 @@ _TOOL_DEFINITIONS = {
           "type": "integer", "minimum": 1, "maximum": 604800,
           "description": (
             "Wake-up deadline in seconds, maximum 604800. Required for "
-            "command waits; normally 2–3× the expected duration."
+            "command or GitHub waits; normally 2–3× the expected duration."
           ),
         },
       },
