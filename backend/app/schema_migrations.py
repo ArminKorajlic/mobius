@@ -5895,6 +5895,138 @@ def _drop_agent_write_journal(eng) -> None:
         conn.execute(text(f"DROP TABLE {table}"))
 
 
+def _move_chat_media_out_of_generated(eng) -> None:
+  """Move old chat images from ``generated/`` to ``media/`` and relink them.
+
+  Chat images once lived in ``chats/<id>/generated/`` and transcripts linked
+  them as ``/api/chats/<id>/generated/<name>``. Current code writes and serves
+  only ``media/``. Finding the old links needs a ``LIKE`` over every stored
+  transcript, which no index can serve, so this runs once from the ledger
+  instead of at every boot.
+
+  Each step leaves a readable state if interrupted: copy into ``media/`` (the
+  old copy stays), commit the link rewrite, then delete the old copy. Name
+  collisions are checked before anything changes. A chat whose ``generated/``
+  file would replace a different ``media/`` file is left exactly as it was
+  and logged, so neither image is lost and boot is never blocked by it.
+  """
+  import filecmp
+  import logging
+  import shutil
+
+  from sqlalchemy import bindparam, inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  transcripts = [
+    name for name in ("messages", "pending_messages") if name in columns
+  ]
+  if not transcripts:
+    return
+  chats_root = Path(os.environ.get("DATA_DIR", "/data")) / "chats"
+  legacy_link = "'%/api/chats/' || id || '/generated/%'"
+  with eng.connect() as conn:
+    chat_ids = set(conn.execute(text(
+      "SELECT id FROM chats WHERE " + " OR ".join(
+        f"CAST({name} AS TEXT) LIKE {legacy_link}" for name in transcripts
+      )
+    )).scalars())
+    # Orphaned directories without a chat row are left alone. ``os.path.isdir``
+    # never raises, so a chat folder that can be listed but not entered is
+    # skipped here and handled per chat below instead of stopping boot.
+    on_disk = sorted(
+      path.parent.name
+      for path in chats_root.glob("*/generated")
+      if os.path.isdir(path)
+    ) if os.path.isdir(chats_root) else []
+    for offset in range(0, len(on_disk), 500):
+      chat_ids.update(conn.execute(
+        text("SELECT id FROM chats WHERE id IN :ids").bindparams(
+          bindparam("ids", expanding=True),
+        ),
+        {"ids": on_disk[offset:offset + 500]},
+      ).scalars())
+
+  def old_files(chat_id: str) -> list[Path]:
+    old_dir = chats_root / chat_id / "generated"
+    # Never follow a symlink: copying its target into media/ would serve a
+    # file from outside the chat, which the media route otherwise refuses.
+    if old_dir.is_symlink() or not old_dir.is_dir():
+      return []
+    return [
+      source for source in old_dir.iterdir()
+      if source.is_file() and not source.is_symlink()
+    ]
+
+  def first_collision(sources: list[Path], media_dir: Path) -> str | None:
+    for source in sources:
+      destination = media_dir / source.name
+      if destination.exists() and (
+        not destination.is_file()
+        or not filecmp.cmp(source, destination, shallow=False)
+      ):
+        return source.name
+    return None
+
+  log = logging.getLogger(__name__)
+  for chat_id in sorted(chat_ids):
+    media_dir = chats_root / chat_id / "media"
+    # Any file error leaves this chat exactly as it was, like a collision:
+    # a one-time migration must never stop boot.
+    try:
+      sources = old_files(chat_id)
+      collision = first_collision(sources, media_dir)
+      if collision is not None:
+        log.warning(
+          "Left chat %s on legacy generated/ media: media/%s already exists "
+          "with different bytes",
+          chat_id, collision,
+        )
+        continue
+      for source in sources:
+        destination = media_dir / source.name
+        if destination.exists():
+          continue
+        media_dir.mkdir(parents=True, exist_ok=True)
+        # Copy under a temporary name so an interrupted copy never leaves a
+        # truncated file that a retry would mistake for a collision.
+        partial = media_dir / f".{source.name}.partial"
+        shutil.copy2(source, partial)
+        os.replace(partial, destination)
+    except OSError as error:
+      log.warning("Left chat %s on legacy generated/ media: %s", chat_id, error)
+      continue
+    # Bump updated_at only on chats whose links change: the browser reuses
+    # its cached copy of a chat while updated_at matches.
+    with eng.begin() as conn:
+      conn.execute(text(
+        "UPDATE chats SET " + ", ".join(
+          f"{name} = REPLACE({name}, :old, :new)" for name in transcripts
+        ) + ", updated_at = :now WHERE id = :chat_id AND (" + " OR ".join(
+          f"CAST({name} AS TEXT) LIKE :pattern" for name in transcripts
+        ) + ")"
+      ), {
+        "chat_id": chat_id,
+        "old": f"/api/chats/{chat_id}/generated/",
+        "new": f"/api/chats/{chat_id}/media/",
+        "pattern": f"%/api/chats/{chat_id}/generated/%",
+        "now": datetime.now(UTC).replace(tzinfo=None),
+      })
+    try:
+      for source in sources:
+        source.unlink()
+      old_dir = chats_root / chat_id / "generated"
+      if not old_dir.is_symlink() and old_dir.is_dir() and not any(old_dir.iterdir()):
+        old_dir.rmdir()
+    except OSError as error:
+      log.warning(
+        "Moved chat %s media but could not remove the old generated/ copy: %s",
+        chat_id, error,
+      )
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -5994,6 +6126,7 @@ _SCHEMA_MIGRATIONS = (
   # Window-based, so it needs no journal. A new ID (not an edited 0082) so
   # databases that ran an earlier, journal-based draft also run this once.
   ("0083_retire_quiet_write_sessions", _retire_quiet_write_sessions),
+  ("0084_chat_media_directory", _move_chat_media_out_of_generated),
 )
 
 
