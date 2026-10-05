@@ -40,11 +40,10 @@ from app.compiler import (
 )
 from app.config import get_settings
 from app.manifest_contract import (
-  ICON_MAX_BYTES,
   MANIFEST_MAX_BYTES,
-  STATIC_ASSET_MAX_BYTES,
-  STATIC_ASSETS_TOTAL_MAX,
+  PACKAGE_MAX_BYTES,
   ManifestContractError,
+  package_bytes_on_disk,
   static_asset_entries,
   validate_manifest_contract,
   validate_repo_relative_path,
@@ -185,7 +184,6 @@ def _snapshot_static_assets(
 ) -> dict[str, bytes]:
   """Read local package assets from the same immutable tree being accepted."""
   assets: dict[str, bytes] = {}
-  total = 0
   for destination, source in static_asset_entries(
     manifest.get("static_assets") or {},
   ).items():
@@ -211,17 +209,6 @@ def _snapshot_static_assets(
         "static_asset_unreadable",
         f"Could not read manifest static asset {source!r}: {exc}",
       ) from exc
-    if len(raw) > STATIC_ASSET_MAX_BYTES:
-      raise AppApplyError(
-        "static_asset_too_large",
-        f"Manifest static asset {source!r} exceeds {STATIC_ASSET_MAX_BYTES} bytes.",
-      )
-    total += len(raw)
-    if total > STATIC_ASSETS_TOTAL_MAX:
-      raise AppApplyError(
-        "static_assets_too_large",
-        f"Manifest static assets exceed {STATIC_ASSETS_TOTAL_MAX} bytes total.",
-      )
     assets[destination] = raw
   return assets
 
@@ -385,6 +372,13 @@ def _read_manifest(snapshot_dir: Path) -> dict:
     validate_manifest_contract(manifest)
   except ManifestContractError as exc:
     raise AppApplyError("manifest_invalid", str(exc)) from exc
+  size = package_bytes_on_disk(snapshot_dir, manifest)
+  if size > PACKAGE_MAX_BYTES:
+    raise AppApplyError(
+      "package_too_large",
+      f"The app package is {size} bytes; installs and the Store accept at "
+      f"most {PACKAGE_MAX_BYTES}.",
+    )
   return dict(manifest)
 
 
@@ -432,18 +426,6 @@ def _entry_source(snapshot_dir: Path, relative: str) -> str:
   return source
 
 
-def _normalize_manifest_icon(relative: str, raw: bytes) -> bytes:
-  if len(raw) > ICON_MAX_BYTES:
-    raise AppApplyError(
-      "icon_too_large",
-      f"Manifest icon {relative!r} exceeds the {ICON_MAX_BYTES}-byte limit.",
-    )
-  try:
-    return icon_assets.normalize_icon(raw)
-  except icon_assets.InvalidIcon as exc:
-    raise AppApplyError("icon_invalid", str(exc)) from exc
-
-
 def _manifest_icon(snapshot_dir: Path, manifest: dict) -> bytes | None:
   """Normalize the icon declared by this exact accepted source snapshot."""
   relative = manifest.get("icon")
@@ -460,7 +442,10 @@ def _manifest_icon(snapshot_dir: Path, manifest: dict) -> bytes | None:
     raise AppApplyError(
       "icon_unreadable", f"Could not read manifest icon {relative!r}: {exc}",
     ) from exc
-  return _normalize_manifest_icon(relative, raw)
+  try:
+    return icon_assets.normalize_icon(raw)
+  except icon_assets.InvalidIcon as exc:
+    raise AppApplyError("icon_invalid", str(exc)) from exc
 
 
 def retire_integrated_app_provenance(db: Session) -> tuple[int, list[str]]:
