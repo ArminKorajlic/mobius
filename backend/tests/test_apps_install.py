@@ -4454,6 +4454,40 @@ def _install_simple(client, auth, base, manifest, jsx=JSX):
     })
 
 
+def test_store_install_honours_the_shell_shortcuts_opt_out(
+  client, auth, db, bypass_url_validation,
+):
+  default = _install_simple(
+    client, auth, "https://keys-default.test/repo/",
+    _simple_manifest("keys-default-app"),
+  )
+  assert default.status_code == 201, default.text
+  assert default.json()["shell_shortcuts"] is True
+
+  manifest = _simple_manifest("keys-off-app")
+  manifest["shell_shortcuts"] = False
+  opted_out = _install_simple(
+    client, auth, "https://keys-off.test/repo/", manifest,
+  )
+  assert opted_out.status_code == 201, opted_out.text
+  assert opted_out.json()["shell_shortcuts"] is False
+  persisted = db.query(models.App).filter(
+    models.App.id == opted_out.json()["id"],
+  ).one()
+  assert persisted.shell_shortcuts is False
+
+  # A Store update whose manifest drops the field restores the default.
+  restored = _install_simple(
+    client, auth, "https://keys-off.test/repo/",
+    _simple_manifest("keys-off-app", version="2.0.0"),
+  )
+  assert restored.status_code == 201, restored.text
+  assert restored.json()["mode"] == "update"
+  assert restored.json()["shell_shortcuts"] is True
+  db.refresh(persisted)
+  assert persisted.shell_shortcuts is True
+
+
 def test_install_response_includes_capability_flags(
   client, auth, db, bypass_url_validation,
 ):
