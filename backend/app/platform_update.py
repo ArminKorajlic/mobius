@@ -1000,7 +1000,9 @@ def _checkout_transition(repo: Path, before: str, target: str, *, dry_run: bool 
   """
   if _ignored_checkout_obstructions(repo, target):
     raise PlatformUpdateError("checkout_blocked_by_ignored_work")
-  _git("read-tree", *(["-n"] if dry_run else []), "-m", "-u", before, target, repo=repo)
+  app_git.merge_trees_into_worktree(
+    repo, before, target, dry_run=dry_run, timeout=_GIT_TIMEOUT,
+  )
 
 
 def _preserve_checkout_state(
