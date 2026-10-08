@@ -144,13 +144,14 @@ export function sameImageReference(a, b) {
 // the image block (`_call_screenshot` in backend/scripts/mobius_control_mcp.py):
 // "Saved /data/chats/<id>/media/<name>.png. To show the owner, …". Base64 text
 // cannot contain the space, so the note cannot be matched inside image data.
-const SAVED_CHAT_IMAGE_NOTE = /(?:^|\s)Saved (\/data\/chats\/[A-Za-z0-9_-]+\/media\/[^/\s]+?)[.;](?:\s|$)/
+const SAVED_IMAGE_NOTE = /(?:^|\s)Saved (\/\S+?)[.;](?:\s|$)/
 
 /** A screenshot renders from its saved chat-media file. Its stored result is
- * the image block followed by that note, so it is never valid inline JSON. */
+ * the image block followed by that note, so it is never valid inline JSON.
+ * chatImageReference owns which saved paths are chat files. */
 export function savedChatImageReference(output) {
   if (typeof output !== 'string') return null
-  const match = output.match(SAVED_CHAT_IMAGE_NOTE)
+  const match = output.match(SAVED_IMAGE_NOTE)
   return match ? chatImageReference(match[1]) : null
 }
 

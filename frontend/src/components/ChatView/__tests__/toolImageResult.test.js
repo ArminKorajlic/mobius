@@ -228,6 +228,11 @@ test('a screenshot saved outside chat media or a plain error yields no saved ref
     savedChatImageReference('Saved /tmp/shot.png; it is outside chat media, so it cannot be embedded.'),
     null,
   )
+  assert.equal(
+    savedChatImageReference('Saved /data/chats/chat-123/deliverables/inbox/shot.png. Done.'),
+    null,
+    'only chat media and uploads are chat image files',
+  )
   assert.equal(savedChatImageReference('screenshot failed: browser did not become ready'), null)
   assert.equal(savedChatImageReference(null), null)
 })
