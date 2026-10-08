@@ -29,7 +29,7 @@ import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
-import { useToolImagePreview } from './useToolImagePreview.js'
+import { useStableImageReference, useToolImagePreview } from './useToolImagePreview.js'
 import ToolEditPreview from './ToolEditPreview.jsx'
 import { toolEditPreview } from './toolEditPreview.js'
 
@@ -143,9 +143,12 @@ function GenericToolBlock({
   const backgroundTask = runningBackgroundTask(t)
   const running = t.status === 'running' || !!backgroundTask
   const iconKind = toolActivityIcon(effectiveName)
-  const isImageTool = effectiveName === 'ViewImage'
-  const hasEditPreview = typeof t.edit_preview?.diff === 'string'
   const failed = toolBlockFailed(t)
+  // A screenshot's result is the captured picture, like a viewed image. A
+  // failed capture has no picture, only its error text, so it stays text.
+  const isImageTool = effectiveName === 'ViewImage'
+    || (effectiveName === 'ScreenControl' && !failed)
+  const hasEditPreview = typeof t.edit_preview?.diff === 'string'
   // Historical activities can contain many closed edits. Keep the durable
   // marker cheap and defer parsing until this disclosure is prepared.
   const wantsPreparation = prepareRequested || desiredOpen
@@ -263,10 +266,10 @@ function GenericToolBlock({
   const hasOutput = !!shownOutput
     || !!t.output_truncated
     || (t.status !== 'running' && shownOutput === '')
-  const imageReference = useMemo(
+  const imageReference = useStableImageReference(useMemo(
     () => (isImageTool ? toolImageReference(t.input, shownOutput, chatId, generatedImage) : null),
     [isImageTool, shownOutput, t.input, chatId, generatedImage],
-  )
+  ))
   const r = useMemo(
     () => (hasOutput && !isImageTool
       ? formatToolResult(shownOutput ?? '', { terminal: isShell })

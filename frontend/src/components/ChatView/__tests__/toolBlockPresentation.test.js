@@ -3,6 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 const toolBlock = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
+const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const toolImageResult = readFileSync(new URL('../ToolImageResult.jsx', import.meta.url), 'utf8')
 const toolImagePreview = readFileSync(new URL('../useToolImagePreview.js', import.meta.url), 'utf8')
 const toolEditPreviewCss = readFileSync(new URL('../ToolEditPreview.css', import.meta.url), 'utf8')
@@ -175,4 +176,21 @@ test('lone and grouped tools share the same disclosed detail boundary', () => {
   assert.match(chatCss,
     /\.chat__tool--compact \.chat__tool-detail,\s*\.chat__activity-timeline \.chat__tool-detail\s*\{[^}]*border:\s*1px solid var\(--border-light\);[^}]*border-radius:\s*10px;[^}]*background:\s*var\(--surface\);/s,
     'a completed grouped command should not lose the panel used by a lone live command')
+})
+
+test('opened image previews keep their generated-file list across unrelated re-renders', () => {
+  // An image preview is keyed by its reference identity, which derives from
+  // the message's generated-file list. Rebuilding that list per render made
+  // every keystroke hide, re-decode, and re-pin scroll to each open image.
+  const declarations = msgContent.match(/const generatedFiles = /g) || []
+  assert.equal(declarations.length, 1, 'one generated-file list per message, not a per-render shadow')
+  assert.match(msgContent, /const generatedFiles = useMemo\(/)
+})
+
+test('an open image keeps one reference object across equal rebuilds', () => {
+  // Preview readiness is keyed by reference identity; an unstable reference
+  // hides the open disclosure and re-pins scroll on every re-render.
+  assert.match(toolBlock, /const imageReference = useStableImageReference\(useMemo\(/)
+  assert.match(toolImagePreview, /export function useStableImageReference\(reference\)/)
+  assert.match(toolImagePreview, /if \(!sameImageReference\(stableRef\.current, reference\)\) stableRef\.current = reference/)
 })

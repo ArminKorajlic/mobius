@@ -130,6 +130,32 @@ export function inlineImageReference(output) {
   }
 }
 
+const IMAGE_REFERENCE_FIELDS = ['kind', 'chatId', 'collection', 'filename', 'expectedSha256', 'src']
+
+/** Two references name the same picture when every identifying field matches. */
+export function sameImageReference(a, b) {
+  if (a === b) return true
+  if (!a || !b) return false
+  return IMAGE_REFERENCE_FIELDS.every(field => a[field] === b[field])
+}
+
+// The screenshot control tool's input is a route or app id, never a path. It
+// saves each capture in chat media and names that file in a fixed note after
+// the image block (`_call_screenshot` in backend/scripts/mobius_control_mcp.py):
+// "Saved /data/chats/<id>/media/<name>.png. To show the owner, …". Base64 text
+// cannot contain the space, so the note cannot be matched inside image data.
+const SAVED_CHAT_IMAGE_NOTE = /(?:^|\s)Saved (\/data\/chats\/[A-Za-z0-9_-]+\/media\/[^/\s]+?)[.;](?:\s|$)/
+
+/** A screenshot renders from its saved chat-media file. Its stored result is
+ * the image block followed by that note, so it is never valid inline JSON. */
+export function savedChatImageReference(output) {
+  if (typeof output !== 'string') return null
+  const match = output.match(SAVED_CHAT_IMAGE_NOTE)
+  return match ? chatImageReference(match[1]) : null
+}
+
 export function toolImageReference(input, output, chatId, generated = {}) {
-  return servedImageReference(input, chatId, generated) || inlineImageReference(output)
+  return servedImageReference(input, chatId, generated)
+    || savedChatImageReference(output)
+    || inlineImageReference(output)
 }

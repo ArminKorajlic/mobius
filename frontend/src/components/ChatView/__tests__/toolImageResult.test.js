@@ -7,6 +7,8 @@ import {
   imagePathFromInput,
   inlineImageReference,
   scratchImageReference,
+  sameImageReference,
+  savedChatImageReference,
   servedImageReference,
   temporaryImageReference,
   toolImageReference,
@@ -200,4 +202,49 @@ test('image-load failures settle without fetching unrelated app metadata', () =>
   assert.match(result, /current\.status !== 'ready'/)
   assert.doesNotMatch(result, /useEffect|useState/)
   assert.match(trigger, /onError=\{onError\}/)
+})
+
+test('a screenshot result renders its saved chat-media file, not the base64 block', () => {
+  const image = JSON.stringify({
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+  })
+  const note = 'Saved /data/chats/chat-123/media/shot-1791457803253833437.png. '
+    + 'To show the owner, paste ![screenshot](/api/chats/chat-123/media/shot-1791457803253833437.png) before describing it.'
+  const output = `${image}\n[Image: source: /tmp/blob.png, original 2560x1271]\n${note}`
+  const saved = {
+    kind: 'chat',
+    chatId: 'chat-123',
+    collection: 'media',
+    filename: 'shot-1791457803253833437.png',
+  }
+  assert.deepEqual(savedChatImageReference(output), saved)
+  assert.deepEqual(toolImageReference('app_id=9', output, 'chat-123'), saved)
+  assert.equal(inlineImageReference(output), null, 'the trailing note makes the result invalid inline JSON')
+})
+
+test('a screenshot saved outside chat media or a plain error yields no saved reference', () => {
+  assert.equal(
+    savedChatImageReference('Saved /tmp/shot.png; it is outside chat media, so it cannot be embedded.'),
+    null,
+  )
+  assert.equal(savedChatImageReference('screenshot failed: browser did not become ready'), null)
+  assert.equal(savedChatImageReference(null), null)
+})
+
+test('a rebuilt reference to the same picture counts as the same image', () => {
+  const chat = { kind: 'chat', chatId: 'c1', collection: 'media', filename: 'shot.png' }
+  assert.equal(sameImageReference(chat, { ...chat }), true)
+  assert.equal(sameImageReference(chat, { ...chat, filename: 'other.png' }), false)
+  assert.equal(
+    sameImageReference(
+      { kind: 'generated', chatId: 'c1', collection: 'generated-files', filename: 'a.png', expectedSha256: 'x' },
+      { kind: 'generated', chatId: 'c1', collection: 'generated-files', filename: 'a.png', expectedSha256: 'y' },
+    ),
+    false,
+    'a different fingerprint is a different picture',
+  )
+  assert.equal(sameImageReference({ kind: 'inline', src: 'data:a' }, { kind: 'inline', src: 'data:b' }), false)
+  assert.equal(sameImageReference(null, chat), false)
+  assert.equal(sameImageReference(null, null), true)
 })

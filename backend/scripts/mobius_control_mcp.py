@@ -1190,6 +1190,8 @@ def _call_screenshot(arguments: dict[str, Any]) -> ToolContent:
     raise RuntimeError("screenshot failed: " + " / ".join(output.splitlines()[-3:]))
   image = Path(lines[0])
   embed = next((line.split(": ", 1)[1] for line in lines if "![screenshot](" in line), None)
+  # The chat renders a screenshot step from this "Saved <path>." note
+  # (savedChatImageReference in frontend/.../ChatView/toolImageResult.js).
   note = (
     f"Saved {image}. To show the owner, paste {embed} before describing it."
     if embed else f"Saved {image}; it is outside chat media, so it cannot be embedded."
