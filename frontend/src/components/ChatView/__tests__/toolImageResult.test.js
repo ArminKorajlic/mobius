@@ -8,7 +8,7 @@ import {
   inlineImageReference,
   scratchImageReference,
   sameImageReference,
-  savedChatImageReference,
+  savedStepImageReference,
   servedImageReference,
   temporaryImageReference,
   toolImageReference,
@@ -204,37 +204,27 @@ test('image-load failures settle without fetching unrelated app metadata', () =>
   assert.match(trigger, /onError=\{onError\}/)
 })
 
-test('a screenshot result renders its saved chat-media file, not the base64 block', () => {
-  const image = JSON.stringify({
-    type: 'image',
-    source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
-  })
-  const note = 'Saved /data/chats/chat-123/media/shot-1791457803253833437.png. '
-    + 'To show the owner, paste ![screenshot](/api/chats/chat-123/media/shot-1791457803253833437.png) before describing it.'
-  const output = `${image}\n[Image: source: /tmp/blob.png, original 2560x1271]\n${note}`
+test('a screenshot step renders its recorded chat-media file without its stored result', () => {
   const saved = {
     kind: 'chat',
     chatId: 'chat-123',
     collection: 'media',
     filename: 'shot-1791457803253833437.png',
   }
-  assert.deepEqual(savedChatImageReference(output), saved)
-  assert.deepEqual(toolImageReference('app_id=9', output, 'chat-123'), saved)
-  assert.equal(inlineImageReference(output), null, 'the trailing note makes the result invalid inline JSON')
+  const step = { savedImage: 'shot-1791457803253833437.png' }
+  // Served means ToolBlock skips the stored-result download entirely.
+  assert.deepEqual(servedImageReference('app_id=9', 'chat-123', step), saved)
+  assert.deepEqual(toolImageReference('route=/shell/?app=9', undefined, 'chat-123', step), saved)
 })
 
-test('a screenshot saved outside chat media or a plain error yields no saved reference', () => {
-  assert.equal(
-    savedChatImageReference('Saved /tmp/shot.png; it is outside chat media, so it cannot be embedded.'),
-    null,
-  )
-  assert.equal(
-    savedChatImageReference('Saved /data/chats/chat-123/deliverables/inbox/shot.png. Done.'),
-    null,
-    'only chat media and uploads are chat image files',
-  )
-  assert.equal(savedChatImageReference('screenshot failed: browser did not become ready'), null)
-  assert.equal(savedChatImageReference(null), null)
+test('a recorded screenshot name never escapes this chat\'s media', () => {
+  assert.equal(savedStepImageReference('../uploads/secret.png', 'chat-123'), null)
+  assert.equal(savedStepImageReference('nested/shot.png', 'chat-123'), null)
+  assert.equal(savedStepImageReference('', 'chat-123'), null)
+  assert.equal(savedStepImageReference(undefined, 'chat-123'), null)
+  assert.equal(savedStepImageReference('shot.png', ''), null)
+  assert.equal(servedImageReference('app_id=9', 'chat-123'), null,
+    'an unrecorded screenshot step is not served')
 })
 
 test('a rebuilt reference to the same picture counts as the same image', () => {

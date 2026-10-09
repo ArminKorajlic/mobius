@@ -94,13 +94,30 @@ export function scratchImageReference(input, chatId) {
   return { kind: 'scratch', chatId, filename: match[2] }
 }
 
+const SAVED_IMAGE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** A screenshot step's input is a route or app id, never a path. The server
+ * records the picture it saved in this chat's media as the step's
+ * `saved_image` (backend/app/screenshot_steps.py), so the step renders from
+ * chat media instead of downloading its much larger stored result. */
+export function savedStepImageReference(savedImage, chatId) {
+  if (!chatId || typeof savedImage !== 'string' || !SAVED_IMAGE_NAME.test(savedImage)) {
+    return null
+  }
+  return { kind: 'chat', chatId, collection: 'media', filename: savedImage }
+}
+
 /** References that can render through an existing protected route without
- * loading the image tool's much larger base64 sidecar. */
-export function servedImageReference(input, chatId, generated = {}) {
-  return chatImageReference(input)
+ * loading the image tool's much larger base64 sidecar. `step` carries what
+ * the transcript records about this step's picture: a screenshot's
+ * `savedImage`, and a viewed deliverable's `files`, `viewedDigest`, and
+ * `completed` (see generatedImageReference). */
+export function servedImageReference(input, chatId, step = {}) {
+  return savedStepImageReference(step.savedImage, chatId)
+    || chatImageReference(input)
     || temporaryImageReference(input, chatId)
     || scratchImageReference(input, chatId)
-    || generatedImageReference(input, chatId, generated)
+    || generatedImageReference(input, chatId, step)
 }
 
 /** Fallback for image tools that viewed a path outside chat media. This work
@@ -139,24 +156,7 @@ export function sameImageReference(a, b) {
   return IMAGE_REFERENCE_FIELDS.every(field => a[field] === b[field])
 }
 
-// The screenshot control tool's input is a route or app id, never a path. It
-// saves each capture in chat media and names that file in a fixed note after
-// the image block (`_call_screenshot` in backend/scripts/mobius_control_mcp.py):
-// "Saved /data/chats/<id>/media/<name>.png. To show the owner, …". Base64 text
-// cannot contain the space, so the note cannot be matched inside image data.
-const SAVED_IMAGE_NOTE = /(?:^|\s)Saved (\/\S+?)[.;](?:\s|$)/
-
-/** A screenshot renders from its saved chat-media file. Its stored result is
- * the image block followed by that note, so it is never valid inline JSON.
- * chatImageReference owns which saved paths are chat files. */
-export function savedChatImageReference(output) {
-  if (typeof output !== 'string') return null
-  const match = output.match(SAVED_IMAGE_NOTE)
-  return match ? chatImageReference(match[1]) : null
-}
-
-export function toolImageReference(input, output, chatId, generated = {}) {
-  return servedImageReference(input, chatId, generated)
-    || savedChatImageReference(output)
+export function toolImageReference(input, output, chatId, step = {}) {
+  return servedImageReference(input, chatId, step)
     || inlineImageReference(output)
 }

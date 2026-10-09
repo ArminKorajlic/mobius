@@ -156,14 +156,15 @@ function GenericToolBlock({
     () => (wantsPreparation && !failed ? toolEditPreview(t.edit_preview) : null),
     [failed, t.edit_preview, wantsPreparation],
   )
-  const generatedImage = useMemo(() => ({
+  const stepImage = useMemo(() => ({
+    savedImage: t.saved_image,
     files: generatedFiles,
     viewedDigest: t.viewed_image_sha256,
     completed: t.status === 'done',
-  }), [generatedFiles, t.viewed_image_sha256, t.tool, t.status])
+  }), [t.saved_image, generatedFiles, t.viewed_image_sha256, t.status])
   const servedImage = useMemo(() => (
-    isImageTool ? servedImageReference(t.input, chatId, generatedImage) : null
-  ), [isImageTool, t.input, chatId, generatedImage])
+    isImageTool ? servedImageReference(t.input, chatId, stepImage) : null
+  ), [isImageTool, t.input, chatId, stepImage])
   // `t.sources` is NOT rendered here: the turn's sources surface once at the
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
@@ -190,10 +191,11 @@ function GenericToolBlock({
     // barrier then guarantees the final queued stash wins the query.
     if (t.status === 'running') return
     if (!t.output_truncated || previewOutput !== null || missingOutput) return
-    // Protected chat media and /tmp rasters render through narrow routes,
-    // avoiding the image tool's much larger base64 sidecar. An image viewed
-    // elsewhere needs the complete result (not the ordinary 20k text preview)
-    // so the fallback data URL is valid.
+    // Protected chat media (including a screenshot's recorded file) and /tmp
+    // rasters render through narrow routes, avoiding the image tool's much
+    // larger base64 sidecar. An image viewed elsewhere needs the complete
+    // result (not the ordinary 20k text preview) so the fallback data URL is
+    // valid.
     if (isImageTool && servedImage) return
     if (!chatId) return
     // Contract rule 6: a reduced block carries a stable tool_use_id and fetches
@@ -267,8 +269,8 @@ function GenericToolBlock({
     || !!t.output_truncated
     || (t.status !== 'running' && shownOutput === '')
   const imageReference = useStableImageReference(useMemo(
-    () => (isImageTool ? toolImageReference(t.input, shownOutput, chatId, generatedImage) : null),
-    [isImageTool, shownOutput, t.input, chatId, generatedImage],
+    () => (isImageTool ? toolImageReference(t.input, shownOutput, chatId, stepImage) : null),
+    [isImageTool, shownOutput, t.input, chatId, stepImage],
   ))
   const r = useMemo(
     () => (hasOutput && !isImageTool
