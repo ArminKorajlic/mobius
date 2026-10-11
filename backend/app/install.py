@@ -40,7 +40,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Awaitable, Callable, Mapping, Sequence
 from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
@@ -79,6 +79,7 @@ from app.manifest_identity import (
   canonical_manifest_identity_key as _canonical_identity_key,
   requested_manifest_source,
   require_bound_manifest as _require_bound_manifest,
+  require_permanent_package,
   stored_manifest_fetch_url,
 )
 from app.manifest_contract import (
@@ -105,6 +106,7 @@ from app.manifest_contract import (
 # net_utils.py for why the two SSRF validators were unified.
 from app.net_utils import (
   MAX_REDIRECTS as _MAX_REDIRECTS,
+  pinned_client,
   validate_url_safe as _validate_url_safe,
 )
 from app.storage_io import atomic_write
@@ -1759,6 +1761,7 @@ def _verify_git_install_candidate(
           "reviewed. Refresh the update and try again."
         ),
         "reason": reason,
+        "retryable": True,
       },
     )
 
@@ -1830,7 +1833,7 @@ async def clear_pending_conflict_update(db: Session, app: models.App) -> None:
   app.conflict_resolver_chat_id = None
   app.conflict_resolver_upstream_commit = None
   db.commit()
-  await asyncio.to_thread(_drop_pending_update_worktree, source_dir)
+  await _to_completion(_drop_pending_update_worktree, source_dir)
   shutil.rmtree(
     Path(source_dir) / ".git" / _PENDING_UPDATE_DIR,
     ignore_errors=True,
@@ -2429,9 +2432,7 @@ def validate_manifest_address(
   if manifest_url is None:
     return
   _, bound_id = requested_manifest_source(manifest_url)
-  if bound_id is None:
-    return
-  if db is not None:
+  if db is not None and bound_id is not None:
     existing = _find_install_identity_row(
       db, source_url=manifest_url, manifest_id=bound_id,
     )
@@ -2492,10 +2493,7 @@ async def preview_manifest_capabilities(
   db: Session | None = None,
 ) -> tuple[dict, str, dict, str]:
   """Return the validated manifest/base and its canonical review contract."""
-  async with httpx.AsyncClient(
-    timeout=_HTTP_TIMEOUT,
-    follow_redirects=False,
-  ) as cli:
+  async with pinned_client(timeout=_HTTP_TIMEOUT) as cli:
     loaded, normalized_base = await _fetch_and_validate_manifest(
       cli,
       manifest_url=manifest_url,
@@ -2833,17 +2831,29 @@ def read_git_package_summary(
 def git_source_error(
   outcome: str, exc: BaseException, *,
   code: str = "git_update_unavailable", failure: str = "",
+  retryable: bool = False,
 ) -> HTTPException:
   """The owner-facing 409 for a Git source that could not be used.
 
   A transfer exceeding its wall-clock ceiling is reported as a timeout,
-  distinct from a missing or unverifiable source.
+  distinct from a missing or unverifiable source. ``retryable`` marks a
+  failure the same request may later get past unchanged; bootstrap retries it.
   """
   if isinstance(exc, app_git.GitTransferTimeout):
     code = "git_transfer_timeout"
     failure = f"The app's Git transfer timed out: {exc}."
     outcome = f"{outcome} Retrying on a steadier connection may help."
-  return HTTPException(409, detail={"code": code, "message": f"{failure} {outcome}".strip()})
+    retryable = True
+  elif isinstance(exc, app_git.HistoryIncomplete):
+    log.warning("install: %s", exc)  # Names the refs; the owner text does not.
+    failure = (
+      "The app's Git history is incomplete, so the update can't be merged "
+      "safely; retry when its source is reachable."
+    )
+    retryable = True
+  return HTTPException(409, detail={
+    "code": code, "message": f"{failure} {outcome}".strip(), "retryable": retryable,
+  })
 
 
 def git_transfer_root() -> Path:
@@ -2885,11 +2895,18 @@ async def _stage(stage: Callable[..., app_git.Staged], *args) -> app_git.Staged:
 
 
 async def _to_completion(function: Callable, *args):
-  """Run a thread that must finish before its caller releases a lock.
+  """Run a thread that must finish before its caller releases a lock."""
+  return await _settle_before_cancel(asyncio.to_thread(function, *args))
 
-  A cancelled caller still waits for the thread, then re-raises.
+
+async def _settle_before_cancel(work: Awaitable):
+  """Await ``work`` to its end even if the caller is cancelled meanwhile.
+
+  Cancelling an ``asyncio.to_thread`` await does not stop its thread. A
+  cancelled caller re-raises only once ``work`` settles, so it never releases a
+  lock or rolls back under writes that are still running.
   """
-  work = asyncio.ensure_future(asyncio.to_thread(function, *args))
+  work = asyncio.ensure_future(work)
   cancelled = False
   while not work.done():
     try:
@@ -2897,6 +2914,16 @@ async def _to_completion(function: Callable, *args):
     except asyncio.CancelledError:
       cancelled = True
   if cancelled:
+    # The caller's outcome is its cancellation, so nobody takes ``work``'s.
+    outcome = None if work.cancelled() else work.exception()
+    if isinstance(outcome, _UncheckedPythonTree):
+      outcome.discard()  # An install's hand-off that will never be checked.
+    elif isinstance(outcome, HTTPException):
+      log.info("Work refused after its caller was cancelled: %s", outcome.detail)
+    elif outcome is not None:
+      log.error(
+        "Work failed after its caller was cancelled", exc_info=outcome,
+      )
     raise asyncio.CancelledError
   return work.result()
 
@@ -3078,10 +3105,7 @@ async def _fetch_install_candidate(
   db: Session | None = None,
 ) -> InstallCandidate:
   """Fetch every install input once and enforce all review/replay guards."""
-  async with httpx.AsyncClient(
-    timeout=_HTTP_TIMEOUT,
-    follow_redirects=False,
-  ) as cli:
+  async with pinned_client(timeout=_HTTP_TIMEOUT) as cli:
     manifest, raw_base = await _fetch_and_validate_manifest(
       cli,
       manifest_url=manifest_url,
@@ -3286,10 +3310,7 @@ async def _authorize_source_handoff(
   package_id = target.package_id
   if existing is None or not package_id or not existing.manifest_url:
     raise HTTPException(409, "App source changed without a trusted handoff.")
-  async with httpx.AsyncClient(
-    timeout=_HTTP_TIMEOUT,
-    follow_redirects=False,
-  ) as cli:
+  async with pinned_client(timeout=_HTTP_TIMEOUT) as cli:
     # The old row's own address is fetched without the stored id binding:
     # trust here comes from `package_id` + `moved_to`, and a `package_id` app
     # may have changed its manifest id without `previous_id`.
@@ -3352,14 +3373,6 @@ def _select_install_target(
       db, source_url=previous_source, manifest_id=manifest_id,
     )
 
-  if existing is not None and existing.package_id is not None:
-    if package_id is None:
-      raise HTTPException(
-        409, "This installed app requires its permanent package identity.",
-      )
-    if existing.package_id != package_id:
-      raise HTTPException(409, "Permanent package identity changed.")
-
   adopting_previous_id = False
   origin_migration = None
   if existing is None:
@@ -3398,6 +3411,14 @@ def _select_install_target(
         adopting_previous_id = True
       else:
         origin_migration = None
+
+  # Every resolved row, including a previous_id predecessor, keeps its
+  # permanent package identity.
+  if existing is not None:
+    try:
+      require_permanent_package(manifest, existing.package_id)
+    except ValueError as exc:
+      raise HTTPException(409, str(exc)) from exc
 
   if (
     existing is not None
@@ -3976,6 +3997,10 @@ class _UncheckedPythonTree(Exception):
     self.runtime = runtime
     self.app_id = app_id
 
+  def discard(self) -> None:
+    """Remove the handed-out runtime copy once checked, or once abandoned."""
+    shutil.rmtree(self.runtime.root, ignore_errors=True)
+
 
 async def _check_reconciled_python(pending: _UncheckedPythonTree) -> CheckedPythonTree:
   """Build or reuse the env and smoke-run the exact reconciled tree, unlocked."""
@@ -3995,7 +4020,7 @@ async def _check_reconciled_python(pending: _UncheckedPythonTree) -> CheckedPyth
       500, "Install failed due to an unexpected server error.",
     ) from exc
   finally:
-    shutil.rmtree(pending.runtime.root, ignore_errors=True)
+    pending.discard()
   return CheckedPythonTree(tree_oid=pending.tree_oid, env=env)
 
 
@@ -4489,12 +4514,14 @@ async def install_from_manifest(
     publication_handoff_app_id=publication_handoff_app_id,
     staged_clone=staged_clone,
   )
+  # Each pass holds the source lock across many Git threads and rolls back on
+  # failure, so a cancelled caller waits for the pass to settle on its own.
   try:
-    return await install_candidate(python_check=None)
+    return await _settle_before_cancel(install_candidate(python_check=None))
   except _UncheckedPythonTree as unchecked:
     pending = unchecked
   python_check = await _check_reconciled_python(pending)
-  return await install_candidate(python_check=python_check)
+  return await _settle_before_cancel(install_candidate(python_check=python_check))
 
 
 async def _install_candidate(
@@ -5087,6 +5114,7 @@ async def _install_candidate(
               code="git_install_unavailable",
               failure="The app's Git repository could not be cloned or verified; "
               "retry when its source is available.",
+              retryable=True,
             ) from exc
         if not cloned_install:
           # record the pristine source tree on `upstream`, then align the
