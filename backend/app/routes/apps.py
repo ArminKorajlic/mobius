@@ -831,23 +831,59 @@ async def install_app(
   """
   # Late import to avoid circular import — install.py reads from
   # routes/apps.py at module top.
-  from app.install import install_from_manifest
-  # Serialize the whole install against any concurrent uninstall — both are
-  # app-lifecycle operations over the same /data/apps trees, and letting them
-  # overlap lets one delete what the other just wrote
-  # (fs_locks.install_uninstall_lock has the full rationale).
-  async with fs_locks.install_uninstall_lock():
-    result = await install_from_manifest(
-      db,
-      manifest_url=body.manifest_url,
-      manifest=body.manifest,
-      raw_base=body.raw_base,
-      source="store",
-      reviewed_capability_digest=body.reviewed_capability_digest,
-      reviewed_source_digest=body.reviewed_source_digest,
-      reviewed_app_id=body.update_app_id,
-      reviewed_upstream_commit=body.reviewed_upstream_commit,
-    )
+  from app import install
+
+  # Git transfers finish before the lifecycle lock, so one slow repository
+  # never holds up other apps' installs, updates or uninstalls.
+  staged_clone = None
+  try:
+    if body.update_app_id is not None and body.reviewed_upstream_commit is not None:
+      reviewed = db.get(models.App, body.update_app_id)
+      reviewed_source = reviewed.source_dir if reviewed is not None else None
+      # Release the request's connection for the transfer, as update-check does.
+      db.rollback()
+      if reviewed_source is not None and app_git.is_repo(reviewed_source):
+        try:
+          await install.fetch_app_commit(
+            reviewed_source, body.reviewed_upstream_commit,
+          )
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+          raise install.git_source_error(
+            "Refresh the update and try again.",
+            exc,
+            code="update_changed",
+            failure="The reviewed Git update is no longer available.",
+          ) from exc
+    elif body.update_app_id is None and body.manifest_url is not None:
+      try:
+        staged_clone = await install.stage_package_clone(body.manifest_url, db=db)
+      except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+        raise install.git_source_error(
+          "Nothing was installed.",
+          exc,
+          code="git_install_unavailable",
+          failure="The app's Git repository could not be cloned or verified; "
+          "retry when its source is available.",
+        ) from exc
+    # Serialize the whole install against any concurrent uninstall — both are
+    # app-lifecycle operations over the same /data/apps trees, and letting them
+    # overlap lets one delete what the other just wrote
+    # (fs_locks.install_uninstall_lock has the full rationale).
+    async with fs_locks.install_uninstall_lock():
+      result = await install.install_from_manifest(
+        db,
+        manifest_url=body.manifest_url,
+        manifest=body.manifest,
+        raw_base=body.raw_base,
+        source="store",
+        reviewed_capability_digest=body.reviewed_capability_digest,
+        reviewed_source_digest=body.reviewed_source_digest,
+        reviewed_app_id=body.update_app_id,
+        reviewed_upstream_commit=body.reviewed_upstream_commit,
+        staged_clone=staged_clone,
+      )
+  finally:
+    await asyncio.to_thread(install.discard_staged, staged_clone)
   app = result.app
   mode = result.mode
   warnings = result.warnings
@@ -1079,10 +1115,9 @@ def _validate_pending_update(repo: Path, receipt: dict) -> _PendingUpdatePlan:
         merge_base=override,
       ) if override is not None else app_git.merge_upstream(repo)
     )
-  except app_git.GitTransferTimeout as exc:
+  except app_git.HistoryIncomplete as exc:
     raise install.git_source_error(
-      "The installed version was left unchanged.",
-      exc,
+      "The installed version was left unchanged.", exc,
     ) from exc
   if merge.status != "conflict" or not merge.conflict_paths:
     raise _conflict_state_changed()
@@ -1263,23 +1298,58 @@ async def _start_conflict_resolver_turn(
   )
 
 
-async def _fetch_update_candidate(
-  repo: Path,
-  manifest_url: str,
-  *,
-  strict: bool,
-):
-  """Fetch one Git candidate; Store updates have no parallel HTTP transport."""
+async def _fetch_update_commit(repo: Path, manifest_url: str) -> str:
+  """Fetch one Git candidate before any lock; Store updates have no HTTP path."""
   from app import install
 
-  if install._derive_repo_ref(manifest_url) is None or not app_git.has_origin(repo):
+  repo_ref = install._derive_repo_ref(manifest_url)
+  if repo_ref is None:
     raise ValueError("app has no root Git update source")
-  return await asyncio.to_thread(
-    install.fetch_git_install_candidate,
-    repo,
-    manifest_url,
-    strict=strict,
-  )
+  origin, ref = repo_ref
+  return await install.fetch_app_commit(repo, ref, expected_origin=origin)
+
+
+def _hidden_merge_upstream(repo: Path) -> str | None:
+  """The upstream commit whose merge base a shallow boundary hides, if any.
+
+  An unreadable repository is left to the locked validation to report.
+  """
+  try:
+    app_git.require_merge_history(repo)
+  except app_git.HistoryIncomplete:
+    return app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  except (OSError, subprocess.SubprocessError):
+    pass
+  return None
+
+
+async def _complete_history(source_dir: str | Path) -> None:
+  """Give a legacy shallow app repo the history its merge needs.
+
+  Only a merge base the shallow boundary actually hides needs the network.
+  """
+  from app import install
+
+  repo = Path(source_dir)
+  upstream = await asyncio.to_thread(_hidden_merge_upstream, repo)
+  if upstream is None:
+    return
+  try:
+    try:
+      await install.fetch_app_commit(repo, upstream)
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+      # The recorded commit may no longer be fetchable by id; the full history
+      # of its origin branch can still reveal the merge base.
+      branch = await asyncio.to_thread(app_git.origin_branch, repo)
+      if branch is None:
+        raise
+      await install.fetch_app_commit(repo, branch)
+  except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+    raise install.git_source_error(
+      "The installed version was left unchanged.",
+      exc,
+      failure="The app's Git history could not be completed.",
+    ) from exc
 
 
 def _pending_update_state(repo: Path, upstream_commit: str) -> Literal[
@@ -1486,15 +1556,18 @@ async def update_check(
   fetch_manifest_url = _update_manifest_source(
     installed_manifest_url, manifest_url,
   )
-  # This lock owns both FETCH_HEAD and the response's linearization point. A
-  # concurrent install cannot advance ``upstream`` or create a receipt between
-  # fetching the candidate and comparing it with the recorded baseline.
+  try:
+    commit = await _fetch_update_commit(repo, fetch_manifest_url)
+  except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+    return _unknown()
+  # This lock is the response's linearization point. A concurrent install
+  # cannot advance ``upstream`` or create a receipt between reading the
+  # candidate and comparing it with the recorded baseline.
   async with fs_locks.source_dir_lock(str(repo)):
     try:
       # Discovery needs only the complete package identity, not its payload.
-      # The summary fetch enforces the same root-Git origin guard as install.
       candidate = await asyncio.to_thread(
-        install.fetch_git_package_summary, repo, fetch_manifest_url,
+        install.read_git_package_summary, repo, commit,
       )
       install.validate_manifest_address(
         candidate.manifest, manifest_url or installed_manifest_url,
@@ -1633,12 +1706,18 @@ async def update_candidate_preview(
   fetch_manifest_url = _update_manifest_source(
     installed_manifest_url, manifest_url,
   )
+  try:
+    commit = await _fetch_update_commit(repo, fetch_manifest_url)
+  except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+    raise install.git_source_error(
+      "The installed version was left unchanged.",
+      exc,
+      failure="This app does not have a usable Git update source.",
+    ) from exc
   async with fs_locks.source_dir_lock(str(repo)):
     try:
-      candidate = await _fetch_update_candidate(
-        repo,
-        fetch_manifest_url,
-        strict=True,
+      candidate = await asyncio.to_thread(
+        install.read_git_install_candidate, repo, commit, fetch_manifest_url,
       )
       install.validate_manifest_address(
         candidate.manifest, manifest_url or installed_manifest_url,
@@ -1858,6 +1937,18 @@ async def _create_conflict_resolver_chat(
   from app import background_agents
 
   prepared = []
+  sources = []
+  for app_id in sorted(set(app_ids)):
+    app = db.get(models.App, app_id)
+    if app is not None and app.deleted_at is None and app_git.is_repo(app.source_dir):
+      sources.append((app_id, app.source_dir))
+  # Release the request's connection before a possible download.
+  db.rollback()
+  for app_id, source_dir in sources:
+    try:
+      await _complete_history(source_dir)
+    except HTTPException as exc:
+      raise _resolver_app_error(exc, app_id) from exc
   async with fs_locks.install_uninstall_lock(), AsyncExitStack() as locks:
     # All storage locks precede every source lock, including when publication
     # holds an unselected app's storage and needs one of these sources.
@@ -2221,6 +2312,8 @@ async def resolve_app_update(
   from app import install
 
   source_dir = _validate_source_dir(body.source_dir, get_settings().data_dir)
+  if app_git.is_repo(source_dir):
+    await _complete_history(source_dir)
   async with fs_locks.install_uninstall_lock():
     matched = _pending_store_update_app(db, source_dir)
     app_id = matched.id

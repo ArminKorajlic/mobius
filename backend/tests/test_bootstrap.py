@@ -27,6 +27,10 @@ from app.bootstrap import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_git_transfer(monkeypatch):
+  """These tests replace the installer, so nothing needs a staged clone."""
+  monkeypatch.setattr("app.bootstrap.stage_package_clone", AsyncMock(return_value=None))
 
 
 def _install_result(name="App", slug="app", app_id=1, mode="install"):
@@ -913,6 +917,60 @@ async def test_retry_waits_for_owner_lifecycle_work_and_respects_its_uninstall(
   assert BOOTSTRAP_STORE_MANIFEST_URL in urls
   assert BOOTSTRAP_SOCIAL_MANIFEST_URL not in urls
   assert not lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_retry_stages_each_clone_before_taking_the_lifecycle_lock(
+  db, monkeypatch,
+):
+  """No network runs under the lock, and a staging timeout stays transient."""
+  from app import app_git, fs_locks
+  from app import bootstrap as bootstrap_mod
+
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  locked = []
+
+  async def stage(url):
+    locked.append(fs_locks.install_uninstall_lock().locked())
+    if url == BOOTSTRAP_SOCIAL_MANIFEST_URL:
+      raise app_git.GitTransferTimeout("it ran longer than 600 seconds")
+    return None
+
+  monkeypatch.setattr(bootstrap_mod, "stage_package_clone", stage)
+  install = AsyncMock(side_effect=_installing_rows(db))
+  with patch("app.bootstrap.install_from_manifest", install):
+    outcome = await bootstrap_mod.ensure_bootstrap_apps_installed(
+      db, retry=("store", "social"),
+    )
+
+  assert locked == [False, False]
+  assert outcome.pending == ("social",)
+  assert [call.kwargs["manifest_url"] for call in install.await_args_list] == [
+    BOOTSTRAP_STORE_MANIFEST_URL,
+  ]
+
+
+@pytest.mark.asyncio
+async def test_unreachable_git_host_at_first_boot_leaves_apps_pending(
+  db, monkeypatch,
+):
+  """Staging the clone is the first network step; its failure is retried."""
+  from app import bootstrap as bootstrap_mod
+  from app import install as install_mod
+
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  monkeypatch.setattr(bootstrap_mod, "stage_package_clone", install_mod.stage_package_clone)
+  monkeypatch.setattr(install_mod, "_derive_repo_ref", lambda _url: (
+    "https://unresolvable.invalid/app.git", "main",
+  ))
+  install = AsyncMock()
+  with patch("app.bootstrap.install_from_manifest", install):
+    outcome = await bootstrap_mod.ensure_bootstrap_apps_installed(db)
+
+  install.assert_not_awaited()
+  assert outcome.pending == tuple(
+    app.manifest_id for app in bootstrap_mod._CORE_BOOTSTRAP_APPS
+  )
 
 
 @pytest.mark.asyncio

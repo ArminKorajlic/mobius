@@ -1123,8 +1123,8 @@ def test_git_clone_timeout_reads_as_a_timeout_not_a_missing_source(
   with patch(
     "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
   ), patch(
-    "app.install.app_git.clone_upstream",
-    side_effect=app_git.GitTransferTimeout("it ran longer than 30 seconds"),
+    "app.install.app_git.stage_clone",
+    side_effect=app_git.GitTransferTimeout("it ran longer than 600 seconds"),
   ):
     failed = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json",
@@ -1132,7 +1132,7 @@ def test_git_clone_timeout_reads_as_a_timeout_not_a_missing_source(
   assert failed.status_code == 409, failed.text
   detail = failed.json()["detail"]
   assert detail["code"] == "git_transfer_timeout"
-  assert "timed out: it ran longer than 30 seconds" in detail["message"]
+  assert "timed out: it ran longer than 600 seconds" in detail["message"]
   assert "Nothing was installed." in detail["message"]
   assert db.query(models.App).filter_by(slug="slow-git").first() is None
 
@@ -1153,7 +1153,7 @@ def test_known_git_origin_clone_failure_rolls_back_instead_of_importing_http(
   with patch(
     "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
   ), patch(
-    "app.install.app_git.clone_upstream", side_effect=RuntimeError("offline"),
+    "app.install.app_git.stage_clone", side_effect=RuntimeError("offline"),
   ):
     failed = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json",
@@ -2464,7 +2464,9 @@ def test_trusted_origin_first_adoption_conflict_resolves_and_finalizes(
 
   # Identity remains the canonical catalog URL while the local bare remote
   # supplies the exact Git commit without external network access.
-  with patch(
+  with _serve_github_from(
+    origin_bare, "https://github.com/mobius-os/app-trusted-adoption.git",
+  ), patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
   ), patch(
@@ -2725,7 +2727,7 @@ def test_trusted_origin_adoption_accepts_equal_tree_with_unrelated_history(
     manifest_url: (200, json.dumps(manifest).encode()),
     raw_base + "index.jsx": (200, JSX.encode()),
   }
-  with patch(
+  with _serve_github_from(bare, expected_origin), patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
   ), patch(
@@ -4981,10 +4983,7 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
     base + "prompt.md": (200, b"v2 prompt"),
     base + "fetch.sh": (200, b""),
   }
-  with patch(
-    "app.routes.apps._fetch_update_candidate",
-    return_value=_git_candidate(next_manifest, jsx_v2),
-  ):
+  with _git_update_source(_git_candidate(next_manifest, jsx_v2)):
     preview = client.get(
       f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
     )
@@ -5041,19 +5040,18 @@ def test_update_candidate_preview_classifies_git_transfer_timeout_without_mutati
   with patch(
     "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
   ), patch(
-    "app.app_git._run_network",
-    side_effect=app_git.GitTransferTimeout("it ran longer than 30 seconds"),
+    "app.app_git._transfer",
+    side_effect=app_git.GitTransferTimeout("it ran longer than 600 seconds"),
   ) as network:
     response = client.get(
       f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
     )
 
   network.assert_called_once()
-  assert network.call_args.args[1] == "fetch"
   assert response.status_code == 409, response.text
   detail = response.json()["detail"]
   assert detail["code"] == "git_transfer_timeout"
-  assert "timed out: it ran longer than 30 seconds" in detail["message"]
+  assert "timed out: it ran longer than 600 seconds" in detail["message"]
   assert "installed version was left unchanged" in detail["message"]
   assert (repo / "index.jsx").read_bytes() == before
   assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH) == upstream
@@ -5889,10 +5887,7 @@ def test_update_candidate_preview_rejects_a_different_catalog_app(
     other_url.rsplit("/", 1)[0] + "/prompt.md": (200, PROMPT.encode()),
     other_url.rsplit("/", 1)[0] + "/fetch.sh": (200, b""),
   }
-  with patch(
-    "app.routes.apps._fetch_update_candidate",
-    return_value=_git_candidate(manifest, JSX),
-  ):
+  with _git_update_source(_git_candidate(manifest, JSX)):
     preview = client.get(
       f"/api/apps/{app_id}/update-candidate-preview",
       headers=auth,
@@ -7100,6 +7095,17 @@ def _fixture_commit(repo: Path, msg: str) -> str:
   ).stdout.strip()
 
 
+@contextmanager
+def _serve_github_from(bare: Path, github_url: str):
+  """Let Git transfer a catalog's GitHub URL from a local bare repository."""
+  with patch.dict(os.environ, {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": f"url.{bare.as_uri()}.insteadOf",
+    "GIT_CONFIG_VALUE_0": github_url,
+  }):
+    yield
+
+
 def _make_clone_fixture(tmp_path, index: str, cards: str):
   work = tmp_path / "catalog-work"
   bare = tmp_path / "catalog.git"
@@ -7192,6 +7198,7 @@ def test_clone_update_fast_forward_uses_full_origin_tree(
   assert (src / "index.jsx").read_text() == index_v2
   assert (src / "cards.js").read_text() == cards_v2
   assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == new_head
+  assert app_git.head_sha(src, app_git.FETCHED_REF) == new_head
   origin_head = app_git._run(src, "rev-parse", "origin/main").stdout.strip()
   assert origin_head == new_head
   assert app_git.local_diverged_from(src, new_head) is False
@@ -7314,7 +7321,7 @@ def test_clone_update_fetch_failure_preserves_installed_git_revision(
   index_v2 = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_HTTP_V2")
   cards_v2 = CLONE_CARDS_V1.replace("CARD_V1", "CARD_HTTP_V2")
   _push_clone_fixture(work, bare, index_v2, cards_v2)
-  with patch("app.app_git.fetch_upstream", side_effect=RuntimeError("offline")):
+  with patch("app.app_git.import_staged", side_effect=RuntimeError("offline")):
     r2 = _install_clone_fixture(
       client, auth, base, {**manifest, "version": "2.0.0"},
       index_v2, cards_v2, bare, include_source_file=True,
@@ -7583,11 +7590,11 @@ def test_catalog_app_rebinds_equal_local_tree_from_synthetic_history(
   canonical_origin = (
     "https://github.com/mobius-os/app-catalog-rebind.git"
   )
-  with patch(
+  with _serve_github_from(bare, canonical_origin), patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses_v2),
   ), patch(
-    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
+    "app.install._derive_repo_ref", return_value=(canonical_origin, "main"),
   ), patch(
     "app.install.app_git.origin_url", return_value=canonical_origin,
   ):
@@ -7980,7 +7987,7 @@ def test_preview_with_old_or_odd_recorded_baseline_manifest(
   })
   materialized = _spy_git_materialized_paths(monkeypatch)
   candidate = _git_candidate({**MANIFEST_MULTI, "id": slug, "source_files": []}, JSX)
-  with patch("app.routes.apps._fetch_update_candidate", AsyncMock(return_value=candidate)):
+  with _git_update_source(candidate):
     preview = client.get(f"/api/apps/{app_id}/update-candidate-preview", headers=auth)
   assert preview.status_code == 200, preview.text
   diff = preview.json()["upstream_diff"]
@@ -8003,7 +8010,10 @@ def test_update_check_legacy_baseline_over_bound_degrades(
   manifest = {**MANIFEST_MULTI, "id": slug, "source_files": []}
   candidate = _git_candidate(manifest, JSX)
   materialized = _spy_git_materialized_paths(monkeypatch)
-  monkeypatch.setattr(install, "fetch_git_package_summary", lambda *a, **k: candidate)
+  monkeypatch.setattr(
+    "app.routes.apps._fetch_update_commit", AsyncMock(return_value=candidate.commit),
+  )
+  monkeypatch.setattr(install, "read_git_package_summary", lambda *a, **k: candidate)
   monkeypatch.setattr(install, "read_git_install_candidate", lambda *a, **k: candidate)
   monkeypatch.setattr(install, "trusted_catalog_checkout", lambda *a, **k: None)
   monkeypatch.setattr(install, "_PACKAGE_MAX_BYTES", 1000)
@@ -8128,7 +8138,8 @@ def test_update_preview_materializes_only_needed_baseline_paths(
     {**manifest, "source_files": ["added.js"], "static_assets": {}}, JSX,
     sources={"added.js": b"new declared source"},
   )
-  monkeypatch.setattr(apps, "_fetch_update_candidate", AsyncMock(return_value=candidate))
+  monkeypatch.setattr(apps, "_fetch_update_commit", AsyncMock(return_value=candidate.commit))
+  monkeypatch.setattr(install, "read_git_install_candidate", lambda *a, **k: candidate)
   preview = client.get(
     f"/api/apps/{response.json()['id']}/update-candidate-preview", headers=auth,
   )
@@ -8178,7 +8189,8 @@ def test_update_preview_does_not_apply_candidate_limits_to_installed_source(
     {**manifest, "source_files": ["big.js"] if oversized == "new_path" else []}, JSX,
     sources={"big.js": b"small new source"} if oversized == "new_path" else {},
   )
-  monkeypatch.setattr(apps, "_fetch_update_candidate", AsyncMock(return_value=candidate))
+  monkeypatch.setattr(apps, "_fetch_update_commit", AsyncMock(return_value=candidate.commit))
+  monkeypatch.setattr(install, "read_git_install_candidate", lambda *a, **k: candidate)
   preview = client.get(
     f"/api/apps/{response.json()['id']}/update-candidate-preview", headers=auth,
   )
@@ -8201,10 +8213,7 @@ def test_update_preview_says_an_oversized_release_is_too_large(
   r1 = _install_v1(client, auth, base, {**MANIFEST_NEWS, "id": "oversized-preview"}, JSX)
   assert r1.status_code == 201, r1.text
   reason = install.package_limit_message(65 * 1024 * 1024)
-  with patch(
-    "app.routes.apps._fetch_update_candidate",
-    side_effect=install.PackageTooLarge(reason),
-  ):
+  with _git_update_source(read_error=install.PackageTooLarge(reason)):
     preview = client.get(
       f"/api/apps/{r1.json()['id']}/update-candidate-preview", headers=auth,
     )
@@ -8221,6 +8230,8 @@ def test_applying_an_oversized_reviewed_update_says_it_is_too_large(
   app = create_local_app(client, auth, name="Oversized reviewed update")
   reason = install.package_limit_message(65 * 1024 * 1024)
   with patch("app.install._reviewed_commit_has_manifest", return_value=True), patch(
+    "app.install.fetch_app_commit", AsyncMock(return_value="f" * 40),
+  ), patch(
     "app.install.read_git_install_candidate",
     side_effect=install.PackageTooLarge(reason),
   ):
@@ -8612,15 +8623,24 @@ def _git_candidate(manifest, jsx, sources=None, job=b"#!/bin/sh\n"):
   )
 
 
+@contextmanager
+def _git_update_source(candidate=None, *, fetch=None, read_error=None):
+  """Serve one update: the unlocked commit fetch, then the locked read."""
+  commit = AsyncMock(return_value="f" * 40, side_effect=fetch)
+  read = MagicMock(return_value=candidate, side_effect=read_error)
+  with patch("app.routes.apps._fetch_update_commit", commit), patch(
+    "app.install.read_git_install_candidate", read,
+  ), patch("app.install.read_git_package_summary", read):
+    yield commit
+
+
 def _update_check(
   client, headers, base, app_id, manifest, jsx, sources=None,
   job=b"#!/bin/sh\n",
   candidate_manifest_url=None,
 ):
   candidate = _git_candidate(manifest, jsx, sources=sources, job=job)
-  with patch(
-    "app.install.fetch_git_package_summary", return_value=candidate,
-  ), patch("app.install.read_git_install_candidate", return_value=candidate):
+  with _git_update_source(candidate):
     return client.get(
       f"/api/apps/{app_id}/update-check",
       headers=headers,
@@ -8636,15 +8656,15 @@ def _update_check(
 
 def test_known_origin_check_never_falls_back_to_http(tmp_path):
   """An origin outage cannot silently change the source being reviewed."""
-  from app.routes.apps import _fetch_update_candidate
+  from app.routes.apps import _fetch_update_commit
   app_git.ensure_repo(tmp_path)
   app_git._run(tmp_path, "remote", "add", "origin", "https://github.com/acme/source.git")
-  with patch("app.install.fetch_git_install_candidate", side_effect=RuntimeError("offline")), patch(
+  with patch("app.app_git._transfer", side_effect=RuntimeError("offline")), patch(
     "app.install._http_get", new_callable=AsyncMock,
   ) as http_get:
     with pytest.raises(RuntimeError, match="offline"):
-      asyncio.run(_fetch_update_candidate(
-        tmp_path, "https://raw.githubusercontent.com/acme/source/main/mobius.json", strict=True,
+      asyncio.run(_fetch_update_commit(
+        tmp_path, "https://raw.githubusercontent.com/acme/source/main/mobius.json",
       ))
   http_get.assert_not_called()
 
@@ -8652,7 +8672,7 @@ def test_known_origin_check_never_falls_back_to_http(tmp_path):
 def test_git_update_candidate_reads_one_commit_without_advancing_managed_refs(
   tmp_path,
 ):
-  from app.install import fetch_git_install_candidate
+  from app.install import fetch_app_commit, read_git_install_candidate
 
   work = tmp_path / "candidate-work"
   bare = tmp_path / "candidate.git"
@@ -8676,7 +8696,9 @@ def test_git_update_candidate_reads_one_commit_without_advancing_managed_refs(
   subprocess.run(
     ["git", "clone", "-q", "--bare", str(work), str(bare)], check=True,
   )
-  assert app_git.clone_upstream(installed, bare.as_uri(), "main") == first
+  staged = app_git.stage_clone(bare.as_uri(), "main", tmp_path / "transfers")
+  app_git.adopt_clone(staged, installed)
+  assert staged.sha == first
 
   manifest["version"] = "2.0.0"
   (work / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -8690,12 +8712,10 @@ def test_git_update_candidate_reads_one_commit_without_advancing_managed_refs(
     ["git", "-C", str(work), "push", "-q", str(bare), "main"], check=True,
   )
 
-  with patch(
-    "app.install._derive_repo_ref", return_value=(bare.as_uri(), "main"),
-  ):
-    candidate = fetch_git_install_candidate(
-      installed, "https://example.invalid/mobius.json", strict=True,
-    )
+  commit = asyncio.run(fetch_app_commit(installed, "main"))
+  candidate = read_git_install_candidate(
+    installed, commit, "https://example.invalid/mobius.json", strict=True,
+  )
 
   assert candidate.commit == second
   assert candidate.manifest["version"] == "2.0.0"
@@ -8876,12 +8896,12 @@ def test_update_check_final_fence_preserves_concurrent_pending_conflict(
       capability_digest="test-capability-digest",
       candidate_digest="0" * 64,
     )
-    return _git_candidate(manifest_v2, upstream_v2)
+    return "f" * 40
 
-  monkeypatch.setattr(
-    "app.install.fetch_git_package_summary", advance_during_fetch,
-  )
-  res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
+  with _git_update_source(
+    _git_candidate(manifest_v2, upstream_v2), fetch=advance_during_fetch,
+  ):
+    res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
   assert res.status_code == 200, res.text
   payload = res.json()
   assert payload["update_available"] is True
@@ -8929,9 +8949,8 @@ def test_update_check_ignores_invalid_preview_metadata_but_install_rejects_it(
   with patch(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
-  ), patch(
-    "app.routes.apps._fetch_update_candidate",
-    side_effect=HTTPException(400, "previews[0].source is required"),
+  ), _git_update_source(
+    read_error=HTTPException(400, "previews[0].source is required"),
   ):
     preview = client.get(
       f"/api/apps/{app_id}/update-candidate-preview", headers=auth,
@@ -8987,9 +9006,8 @@ def test_update_check_malformed_candidate_degrades_to_unknown(
   installed = _install_v1(client, auth, base, manifest, JSX)
   assert installed.status_code == 201, installed.text
   candidate = {**manifest, **invalid} if isinstance(invalid, dict) else invalid
-  with patch(
-    "app.install.fetch_git_package_summary",
-    side_effect=ValueError(f"invalid candidate: {candidate!r}"),
+  with _git_update_source(
+    read_error=ValueError(f"invalid candidate: {candidate!r}"),
   ):
     response = client.get(
       f"/api/apps/{installed.json()['id']}/update-check",
@@ -9155,10 +9173,7 @@ def test_update_check_network_failure_degrades_to_null(
   app_id = r1.json()["id"]
 
   # A failed Git fetch degrades to unknown rather than breaking Store refresh.
-  with patch(
-    "app.install.fetch_git_package_summary",
-    side_effect=RuntimeError("synthetic origin outage"),
-  ):
+  with _git_update_source(fetch=RuntimeError("synthetic origin outage")):
     res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
   assert res.status_code == 200, res.text
   assert res.json()["update_available"] is None
@@ -9187,11 +9202,9 @@ def test_update_check_releases_db_connection_before_remote_fetch(
       "update-check kept its request DB connection checked out while "
       "starting remote work"
     )
-    raise HTTPException(status_code=502, detail="synthetic upstream outage")
+    raise RuntimeError("synthetic upstream outage")
 
-  with patch(
-    "app.install.fetch_git_package_summary", new=_slow_remote_fetch,
-  ):
+  with _git_update_source(fetch=_slow_remote_fetch):
     res = client.get(f"/api/apps/{app_id}/update-check", headers=auth)
 
   assert res.status_code == 200, res.text
@@ -10177,10 +10190,10 @@ def test_conflict_resolver_rejects_oversized_prompt_before_parking_any_checkout(
                for app_id in ids)
 
 
-def test_install_git_network_has_short_lifecycle_ceiling(
+def test_install_git_transfer_has_the_transfer_ceiling(
   client, auth, db, bypass_url_validation, monkeypatch,
 ):
-  """An unopened connection must not monopolize app lifecycle work."""
+  """An overlong clone is reported as a timeout and installs nothing."""
   base = "https://raw.githubusercontent.com/acme/unopened/main/"
   manifest = {
     "id": "unopened", "name": "Unopened", "version": "1.0.0",
@@ -10197,10 +10210,9 @@ def test_install_git_network_has_short_lifecycle_ceiling(
     timed_out = False
 
     def communicate(self, *args, **kwargs):
-      if not self.timed_out and ("clone" in self.args or "fetch" in self.args):
+      if not self.timed_out and "fetch" in self.args:
         self.timed_out = True
         seen.append(kwargs["timeout"])
-        assert 0 < kwargs["timeout"] <= 30
         raise subprocess.TimeoutExpired(self.args, kwargs["timeout"])
       return super().communicate(*args, **kwargs)
 
@@ -10211,13 +10223,13 @@ def test_install_git_network_has_short_lifecycle_ceiling(
     failed = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json",
     })
-  assert seen
+  assert seen == [app_git._GIT_TRANSFER_TIMEOUT]
   assert failed.status_code == 409, failed.text
   assert failed.json()["detail"]["code"] == "git_transfer_timeout"
   assert db.query(models.App).filter_by(slug="unopened").first() is None
 
 
-def test_update_git_fetch_has_short_ceiling_and_preserves_installed_revision(
+def test_update_git_transfer_timeout_preserves_installed_revision(
   client, auth, tmp_path, bypass_url_validation, monkeypatch,
 ):
   base = "https://raw.githubusercontent.com/acme/fetch-ceiling/main/"
@@ -10240,7 +10252,6 @@ def test_update_git_fetch_has_short_ceiling_and_preserves_installed_revision(
       if not self.timed_out and ("fetch" in self.args):
         self.timed_out = True
         seen.append(kwargs["timeout"])
-        assert 0 < kwargs["timeout"] <= 30
         raise subprocess.TimeoutExpired(self.args, kwargs["timeout"])
       return super().communicate(*args, **kwargs)
 
@@ -10249,7 +10260,7 @@ def test_update_git_fetch_has_short_ceiling_and_preserves_installed_revision(
     client, auth, base, {**manifest, "version": "2.0.0"},
     CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
   )
-  assert seen
+  assert seen == [app_git._GIT_TRANSFER_TIMEOUT]
   assert failed.status_code == 409, failed.text
   assert failed.json()["detail"]["code"] == "git_transfer_timeout"
   src = Path(get_settings().data_dir) / "apps" / "fetch-ceiling"
@@ -10258,7 +10269,7 @@ def test_update_git_fetch_has_short_ceiling_and_preserves_installed_revision(
 
 
 @pytest.mark.parametrize("operation", ["update", "resolver"])
-def test_update_merge_unshallow_timeout_is_short_and_preserves_installed_app(
+def test_shallow_history_never_transfers_under_locks_and_preserves_installed_app(
   client, auth, db, bypass_url_validation, monkeypatch, operation,
 ):
   from app import install
@@ -10275,8 +10286,8 @@ def test_update_merge_unshallow_timeout_is_short_and_preserves_installed_app(
   upstream_before = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
 
   def hide_merge_base(source_dir):
-    # Model a depth-one upstream graft left by an earlier fetch. Local Git
-    # commands and the entire merge -> unshallow chain remain real.
+    # Model a depth-one upstream graft left by an earlier fetch. The update's
+    # merge refuses it locally; the resolver completes history before locking.
     app_git._run(source_dir, "remote", "add", "origin", base)
     upstream = app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH)
     (Path(source_dir) / ".git" / "shallow").write_text(upstream + "\n")
@@ -10307,7 +10318,6 @@ def test_update_merge_unshallow_timeout_is_short_and_preserves_installed_app(
       if not self.timed_out and ("--unshallow" in self.args):
         self.timed_out = True
         seen.append(kwargs["timeout"])
-        assert 0 < kwargs["timeout"] <= 30
         raise subprocess.TimeoutExpired(self.args, kwargs["timeout"])
       return super().communicate(*args, **kwargs)
 
@@ -10321,9 +10331,13 @@ def test_update_merge_unshallow_timeout_is_short_and_preserves_installed_app(
       f"/api/apps/{app_id}/conflict-resolver-chat", headers=auth,
     )
 
-  assert seen == [30]
   assert failed.status_code == 409, failed.text
-  assert failed.json()["detail"]["code"] == "git_transfer_timeout"
+  if operation == "update":
+    assert seen == []
+    assert failed.json()["detail"]["code"] == "git_update_unavailable"
+  else:
+    assert seen == [app_git._GIT_TRANSFER_TIMEOUT]
+    assert failed.json()["detail"]["code"] == "git_transfer_timeout"
   assert (repo / "index.jsx").read_text() == local
   assert app_git.head_sha(repo, app_git.UPSTREAM_BRANCH) == upstream_before
   assert not install.pending_update_worktree(repo).exists()
