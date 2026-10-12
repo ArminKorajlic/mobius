@@ -225,6 +225,37 @@ def test_a_failed_fork_gives_a_plain_reason(db, chat, fake_fork):
   assert "session can't be copied" in failed.value.message
 
 
+def test_only_the_forks_own_report_picks_the_failure_reason(db, chat, fake_fork):
+  # A CLI warning elsewhere on stderr that happens to say "not found" is not
+  # the fork script's failure line, so the message stays the general one.
+  fake_fork(
+    'sys.stderr.write("warning: cached model not found\\n'
+    'fork-session: Claude returned an empty coaching response"); sys.exit(1)'
+  )
+  _with_session(db, chat)
+  plan = side_questions.plan_side_question(db, chat, "what runs?")
+
+  with pytest.raises(side_questions.SideQuestionError) as failed:
+    asyncio.run(side_questions.answer_side_question(plan, "/tmp"))
+
+  assert failed.value.status_code == 502
+  assert failed.value.message == "The side question couldn't be answered. Try again."
+
+
+def test_an_overlong_answer_is_cut_so_add_to_chat_always_fits_it(db, chat, fake_fork):
+  fake_fork(
+    'print(json.dumps({"answer": "x" * %d}))'
+    % (side_questions.MAX_ANSWER_CHARS + 5000)
+  )
+  _with_session(db, chat)
+  plan = side_questions.plan_side_question(db, chat, "what runs?")
+
+  answer = asyncio.run(side_questions.answer_side_question(plan, "/tmp"))
+
+  assert len(answer.answer) <= side_questions.MAX_ANSWER_CHARS
+  assert answer.answer.endswith("*(Answer shortened to fit in the chat.)*")
+
+
 # ── Add to chat ──────────────────────────────────────────────────────────
 
 

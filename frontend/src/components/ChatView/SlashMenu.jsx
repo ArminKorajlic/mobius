@@ -50,6 +50,7 @@ export default function SlashMenu({
         {commands.map((command, index) => {
           const active = index === activeIndex
           const available = isAvailable(command)
+          const alias = aliasNote(command)
           return (
             <li
               key={command.name}
@@ -66,9 +67,7 @@ export default function SlashMenu({
             >
               <div className="slash-menu__line">
                 <span className="slash-menu__name">/{command.invokedAs || command.name}</span>
-                {aliasNote(command) && (
-                  <span className="slash-menu__alias">{aliasNote(command)}</span>
-                )}
+                {alias && <span className="slash-menu__alias">{alias}</span>}
                 <span className="slash-menu__args">{command.args}</span>
               </div>
               <div className="slash-menu__summary">{command.summary}</div>

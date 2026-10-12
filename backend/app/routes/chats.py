@@ -31,6 +31,7 @@ from app import (
   questions,
   schemas,
   secure_inputs,
+  side_questions,
 )
 from app.chat_visibility import (
   coerce_agent_settings,
@@ -3066,14 +3067,16 @@ async def stop_manual_compaction(
 
 
 class SideQuestionAsk(BaseModel):
-  question: str = Field(min_length=1, max_length=4000)
+  question: str = Field(min_length=1, max_length=side_questions.MAX_QUESTION_CHARS)
 
 
 class SideQuestionKeep(BaseModel):
   # Client-minted identity: a retried add returns the row it already stored.
   cid: str = Field(min_length=1, max_length=128)
-  question: str = Field(min_length=1, max_length=4000)
-  answer: str = Field(min_length=1, max_length=20000)
+  question: str = Field(min_length=1, max_length=side_questions.MAX_QUESTION_CHARS)
+  # answer_side_question bounds its answers the same way, so a card that was
+  # shown can always be added.
+  answer: str = Field(min_length=1, max_length=side_questions.MAX_ANSWER_CHARS)
   provider: Literal["claude", "codex"]
 
 
@@ -3091,20 +3094,16 @@ async def ask_chat_side_question(
   nothing reaches the transcript unless the owner adds the answer through
   ``POST /side-questions``. One question runs per chat at a time.
   """
-  from app.side_questions import (
-    SideQuestionError, answer_side_question, plan_side_question,
-  )
-
   chat = get_active_chat_or_404(db, chat_id)
   try:
-    plan = plan_side_question(db, chat, body.question)
-  except SideQuestionError as exc:
+    plan = side_questions.plan_side_question(db, chat, body.question)
+  except side_questions.SideQuestionError as exc:
     raise HTTPException(exc.status_code, exc.message) from exc
   # The fork can take minutes; it must not hold a database connection.
   db.close()
   try:
-    answer = await answer_side_question(plan, get_settings().data_dir)
-  except SideQuestionError as exc:
+    answer = await side_questions.answer_side_question(plan, get_settings().data_dir)
+  except side_questions.SideQuestionError as exc:
     raise HTTPException(exc.status_code, exc.message) from exc
   return {
     "question": answer.question,

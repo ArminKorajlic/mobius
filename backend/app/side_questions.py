@@ -32,6 +32,9 @@ SIDE_QUESTION_TIMEOUT_SECS = 180
 MAX_QUESTION_CHARS = 4000
 # An added answer becomes part of the agent's next turn, so keep it bounded.
 MAX_ANSWER_CHARS = 20000
+# Appended inside MAX_ANSWER_CHARS when a fork's answer had to be cut, so the
+# card shows exactly what "Add to chat" can store.
+_TRUNCATION_NOTE = "\n\n*(Answer shortened to fit in the chat.)*"
 FORKABLE_PROVIDERS = ("claude", "codex")
 
 _FORK_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "fork_session.py"
@@ -201,13 +204,31 @@ async def answer_side_question(
     raise SideQuestionError(502, "The side question came back unreadable.") from exc
   if not answer:
     raise SideQuestionError(502, "The side question came back empty.")
-  return SideAnswer(question=plan.question, answer=answer, provider=plan.provider)
+  return SideAnswer(
+    question=plan.question, answer=_bounded_answer(answer), provider=plan.provider,
+  )
+
+
+def _bounded_answer(answer: str) -> str:
+  """The answer cut to MAX_ANSWER_CHARS, so "Add to chat" always fits it."""
+  if len(answer) <= MAX_ANSWER_CHARS:
+    return answer
+  return (
+    answer[: MAX_ANSWER_CHARS - len(_TRUNCATION_NOTE)].rstrip() + _TRUNCATION_NOTE
+  )
 
 
 def _fork_failure_message(detail: str) -> str:
   """An owner-facing reason; the script's own words stay in the server log."""
   log.warning("side question fork failed: %s", detail[-2000:])
-  if "not found" in detail or "expired" in detail:
+  # fork_session.py reports its failure as one "fork-session: ..." line; the
+  # rest of stderr (a CLI warning that happens to say "not found", say) must
+  # not pick the owner's message.
+  reported = [
+    line for line in detail.splitlines() if line.startswith("fork-session: ")
+  ]
+  reason = reported[-1] if reported else ""
+  if "not found" in reason or "expired" in reason:
     return "This chat's session can't be copied right now, so the side question couldn't run."
   return "The side question couldn't be answered. Try again."
 
