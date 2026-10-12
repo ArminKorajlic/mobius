@@ -207,15 +207,15 @@ test('the bare menu lists /new once, under its own name', () => {
   assert.equal(applySlashCommand(newCommand), '/new ')
 })
 
-test('/btw is selectable only in Claude and Codex chats', () => {
+test('/btw is selectable only in Claude chats, whose forks run tool-less', () => {
   const [btw] = matchSlashCommands('/btw')
   assert.equal(btw.name, 'btw')
   assert.equal(slashCommandIsAvailable(btw, 'claude'), true)
-  assert.equal(slashCommandIsAvailable(btw, 'codex'), true)
+  assert.equal(slashCommandIsAvailable(btw, 'codex'), false)
   assert.equal(slashCommandIsAvailable(btw, 'mobius'), false)
   assert.equal(
-    slashCommandUnavailableReason(btw, 'mobius'),
-    'Available in Claude or Codex chats.',
+    slashCommandUnavailableReason(btw, 'codex'),
+    'Available in Claude chats.',
   )
 })
 

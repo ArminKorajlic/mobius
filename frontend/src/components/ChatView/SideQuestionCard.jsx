@@ -5,12 +5,12 @@ import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import './SideQuestionCard.css'
 
 /**
- * Presentational: useSideQuestion owns the request. The card says plainly that
- * nothing is in the chat until "Add to chat", and in a Codex chat that the
- * copy sees the chat only up to its last finished reply (Codex forks at turn
- * boundaries, so a reply still in progress is not part of the copy).
+ * Presentational: useSideQuestion owns the request. The card says plainly
+ * that nothing is in the chat until "Add to chat". Closing while the copy is
+ * answering really cancels it: the hook aborts the request and the server
+ * ends the fork.
  */
-export default function SideQuestionCard({ sideQuestion, provider, onAdd, onClose, onRetry }) {
+export default function SideQuestionCard({ sideQuestion, onAdd, onClose, onRetry }) {
   if (!sideQuestion) return null
   const { status, question, answer, error } = sideQuestion
   const answered = status === 'answered' || status === 'adding'
@@ -40,11 +40,6 @@ export default function SideQuestionCard({ sideQuestion, provider, onAdd, onClos
         {answered && <StandardMarkdown text={answer} />}
         {error && <p className="side-question__error" role="alert">{error}</p>}
       </div>
-      {provider === 'codex' && (
-        <p className="side-question__note">
-          Codex answers from this chat up to its last finished reply.
-        </p>
-      )}
       {(answered || status === 'failed') && (
         <div className="side-question__actions">
           {answered && (

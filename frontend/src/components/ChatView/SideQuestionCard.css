@@ -128,12 +128,6 @@
   color: var(--danger);
 }
 
-.side-question__note {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
 .side-question__actions {
   display: flex;
   justify-content: flex-end;

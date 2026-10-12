@@ -57,8 +57,10 @@ export const SLASH_COMMANDS = [
     args: '<side question>',
     summary: 'Ask a side question',
     detail: 'A temporary copy of this chat answers. The agent isn’t interrupted.',
-    // Answers come from a fork of the provider's own session.
-    providers: ['claude', 'codex'],
+    // Answers come from a fork of the provider's own session. Claude-only:
+    // only a Claude fork can run with every tool turned off, and a copy that
+    // kept file reads could leak owner data to the provider (PR #1836 review).
+    providers: ['claude'],
   },
 ]
 

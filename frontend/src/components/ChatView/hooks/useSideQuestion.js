@@ -16,30 +16,50 @@ export function sideQuestionFailure(error) {
 /**
  * `sideQuestion` is null or `{ question, status, answer, provider, error }`,
  * where status is `asking`, `answered`, `adding` or `failed`. Only the latest
- * question owns the card: closing it or asking again makes an earlier answer
- * arrive into nothing, and changing chats drops the card. Nothing is saved
- * until `add()`; a retried add reuses its `cid`, so it cannot save twice.
+ * question owns the card, and closing it, asking again, changing chats or
+ * unmounting ABORTS an in-flight ask, so the server can end the hidden
+ * provider fork instead of running it out (its CancelledError path kills the
+ * fork's process group). Nothing is saved until `add()`; a retried add reuses
+ * its `cid`, so it cannot save twice. A successful add always reconciles the
+ * transcript through `onAdded`, even when its card was closed or replaced
+ * while the write was in flight — the row is committed either way, and hiding
+ * that would misreport the write as cancelled.
  */
 export default function useSideQuestion({ chatId, onAdded }) {
   const [sideQuestion, setSideQuestion] = useState(null)
   const requestRef = useRef(0)
+  const controllerRef = useRef(null)
   const currentRef = useRef(null)
   currentRef.current = sideQuestion
   const onAddedRef = useRef(onAdded)
   onAddedRef.current = onAdded
 
-  useEffect(() => {
+  const abandon = useCallback(() => {
     requestRef.current += 1
+    controllerRef.current?.abort()
+    controllerRef.current = null
+  }, [])
+
+  useEffect(() => {
+    abandon()
     setSideQuestion(null)
-  }, [chatId])
+    // Unmount is a close too: never leave a hidden fork running for a card
+    // that can no longer show its answer.
+    return abandon
+  }, [chatId, abandon])
 
   const ask = useCallback(async (question) => {
+    controllerRef.current?.abort()
+    const controller = new AbortController()
+    controllerRef.current = controller
     const request = ++requestRef.current
     const owns = () => requestRef.current === request
     setSideQuestion({ request, question, status: 'asking' })
     try {
       const answer = await jsonOrThrow(
-        await api.chats.askSideQuestion(chatId, question),
+        await api.chats.askSideQuestion(chatId, question, {
+          signal: controller.signal,
+        }),
         'Side question failed',
       )
       if (!owns()) return
@@ -70,10 +90,11 @@ export default function useSideQuestion({ chatId, onAdded }) {
         answer: card.answer,
         provider: card.provider,
       }), 'Adding the side question failed')
+      // The row is committed: show it regardless of what happened to the card.
+      onAddedRef.current?.()
       if (requestRef.current !== card.request) return
       requestRef.current += 1
       setSideQuestion(null)
-      onAddedRef.current?.()
     } catch (error) {
       if (requestRef.current !== card.request) return
       setSideQuestion({ ...card, status: 'answered', error: sideQuestionFailure(error) })
@@ -81,9 +102,9 @@ export default function useSideQuestion({ chatId, onAdded }) {
   }, [chatId])
 
   const close = useCallback(() => {
-    requestRef.current += 1
+    abandon()
     setSideQuestion(null)
-  }, [])
+  }, [abandon])
 
   const retry = useCallback(() => {
     const card = currentRef.current

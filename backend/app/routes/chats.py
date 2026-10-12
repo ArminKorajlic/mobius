@@ -3077,7 +3077,8 @@ class SideQuestionKeep(BaseModel):
   # answer_side_question bounds its answers the same way, so a card that was
   # shown can always be added.
   answer: str = Field(min_length=1, max_length=side_questions.MAX_ANSWER_CHARS)
-  provider: Literal["claude", "codex"]
+  # Matches FORKABLE_PROVIDERS: only a provider whose fork can run tool-less.
+  provider: Literal["claude"]
 
 
 @router.post("/{chat_id}/btw", dependencies=[Depends(reject_cross_site)])
@@ -3096,7 +3097,9 @@ async def ask_chat_side_question(
   """
   chat = get_active_chat_or_404(db, chat_id)
   try:
-    plan = side_questions.plan_side_question(db, chat, body.question)
+    plan = side_questions.plan_side_question(
+      db, chat, body.question, get_settings().data_dir,
+    )
   except side_questions.SideQuestionError as exc:
     raise HTTPException(exc.status_code, exc.message) from exc
   # The fork can take minutes; it must not hold a database connection.

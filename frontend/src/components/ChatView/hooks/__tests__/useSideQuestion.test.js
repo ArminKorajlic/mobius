@@ -18,9 +18,9 @@ function setup(t) {
     const original = api.chats[name]
     t.after(() => { api.chats[name] = original })
   }
-  api.chats.askSideQuestion = (chatId, question) => {
+  api.chats.askSideQuestion = (chatId, question, options) => {
     const pending = deferred()
-    asks.push({ chatId, question, ...pending })
+    asks.push({ chatId, question, options, ...pending })
     return pending.promise
   }
   api.chats.keepSideQuestion = (chatId, payload) => {
@@ -92,6 +92,51 @@ test('closing while the copy is answering drops its late answer', async t => {
   asks[0].resolve(Response.json(answer))
   await asking
   await flush()
+  assert.equal(hook.result.current.sideQuestion, null)
+})
+
+test('closing really cancels: the in-flight request is aborted', async t => {
+  const { hook, asks } = setup(t)
+  const asking = hook.result.current.ask('what runs?')
+  assert.equal(asks[0].options.signal.aborted, false)
+  hook.result.current.close()
+  assert.equal(asks[0].options.signal.aborted, true,
+    'close must abort the request so the server can end the hidden fork')
+  const abort = new Error('aborted')
+  abort.name = 'AbortError'
+  asks[0].reject(abort)
+  await asking
+  await flush()
+  assert.equal(hook.result.current.sideQuestion, null)
+})
+
+test('switching chats and unmounting abort an in-flight ask', async t => {
+  const { hook, asks } = setup(t)
+  void hook.result.current.ask('what runs?')
+  hook.rerender({ chatId: 'chat-b', onAdded: () => {} })
+  assert.equal(asks[0].options.signal.aborted, true)
+  void hook.result.current.ask('and here?')
+  hook.unmount()
+  assert.equal(asks[1].options.signal.aborted, true)
+  for (const ask of asks) {
+    const abort = new Error('aborted')
+    abort.name = 'AbortError'
+    ask.reject(abort)
+  }
+  await flush()
+})
+
+test('a successful add still reconciles the transcript after the card closed', async t => {
+  const { hook, asks, keeps, added } = setup(t)
+  const asking = hook.result.current.ask('what runs?')
+  asks[0].resolve(Response.json(answer))
+  await asking
+  const adding = hook.result.current.add()
+  hook.result.current.close()
+  keeps[0].resolve(Response.json({ stored: { cid: keeps[0].payload.cid } }))
+  await adding
+  assert.deepEqual(added, ['added'],
+    'the row committed, so hiding it would misreport the write as cancelled')
   assert.equal(hook.result.current.sideQuestion, null)
 })
 

@@ -4318,6 +4318,11 @@ export default function ChatView({
       setSendFailure('A side question is already being answered. Close it to ask another.')
       return
     }
+    // Replacing the card mid-add would race the committed row's confirmation.
+    if (sideQuestions.sideQuestion?.status === 'adding') {
+      setSendFailure('The previous answer is still being added to the chat. One moment.')
+      return
+    }
     setSendFailure(null)
     setComposerInput('')
     void sideQuestions.ask(question)
@@ -6602,7 +6607,6 @@ export default function ChatView({
         />
         <SideQuestionCard
           sideQuestion={sideQuestions.sideQuestion}
-          provider={chatInfo?.provider}
           onAdd={sideQuestions.add}
           onClose={sideQuestions.close}
           onRetry={sideQuestions.retry}
