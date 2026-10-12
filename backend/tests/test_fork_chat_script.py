@@ -306,7 +306,12 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn(tmp_path, monkeypatch):
   after.release()
 
 
-def test_codex_side_question_fork_is_ephemeral_and_uses_the_chats_model():
+def test_codex_side_question_fork_is_ephemeral_and_uses_the_chats_model(
+  tmp_path, monkeypatch,
+):
+  # The fork derives its lock directory from CODEX_HOME; without this pin the
+  # test would reach for the instance's real /data, which CI does not have.
+  monkeypatch.setenv("CODEX_HOME", str(tmp_path / "cli-auth" / "codex"))
   calls = {}
 
   class FakeConfig:
