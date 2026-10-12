@@ -941,6 +941,11 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
+  // ChatInputBar installs `{ open(cid), discard(cid) }` here so the queue
+  // tray's pencil and × reach the chat box; it reports which queued message
+  // the box is editing for the tray's "In the chat box" tag.
+  const queuedComposerRef = useRef(null)
+  const [queuedInComposerCid, setQueuedInComposerCid] = useState(null)
   // The model/effort picker can accept another choice before the prior save
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
@@ -6458,16 +6463,19 @@ export default function ChatView({
         />
         <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
-            onCancel={handleCancelPending}
+            onCancel={cid => {
+              queuedComposerRef.current?.discard(cid)
+              void handleCancelPending(cid)
+            }}
             onRetry={handleRetryRejected}
-            onEdit={handleUpdatePending}
+            onEditInComposer={cid => queuedComposerRef.current?.open(cid)}
+            inComposerCid={queuedInComposerCid}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}
             steerBusy={steerBusy}
             turnActive={turnActive}
             online={online}
             restarting={restartPending}
-            focusComposer={() => focusComposerElement(inputRef.current)}
           />
         <CompactionProgress
           progress={compactionProgress}
@@ -6514,6 +6522,10 @@ export default function ChatView({
           onRemoveFile={handleComposerRemoveFile}
           attachTriggerRef={attachTriggerRef}
           messageHistory={messageHistory}
+          queuedMessages={pendingQueue.visiblePendingMessages}
+          onSaveQueued={handleUpdatePending}
+          queuedComposerRef={queuedComposerRef}
+          onQueuedInComposerChange={setQueuedInComposerCid}
           provider={chatInfo?.provider}
           projectRef={chatInfo?.project || null}
           leftButtons={

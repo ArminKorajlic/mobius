@@ -70,12 +70,16 @@
  * ║      turn when possible, otherwise it sends normally.            ║
  * ║      Shift+Enter always inserts a newline.                        ║
  * ║                                                                  ║
- * ║   8. SENT-MESSAGE HISTORY                                        ║
- * ║      Up recalls sent messages only after native textarea movement ║
- * ║      has reached the visual top; once browsing, Up/Down walk       ║
- * ║      history and Down past the newest restores the unfinished     ║
- * ║      draft. Manual edits and sends exit history. Modifier chords   ║
- * ║      and IME composition stay native.                              ║
+ * ║   8. MESSAGE HISTORY AND QUEUED EDITS                            ║
+ * ║      Up walks queued messages (newest first), then sent ones;    ║
+ * ║      Down comes back to the draft. They switch only from the     ║
+ * ║      top or bottom line; elsewhere the caret moves natively.     ║
+ * ║      The draft is kept until it is sent: edits to browsed        ║
+ * ║      messages survive moves and Esc drops them. Enter saves a    ║
+ * ║      queued message in place or sends an earlier one again,      ║
+ * ║      then the draft returns. The queue's pencil opens its        ║
+ * ║      message here too. Modifier chords and IME composition       ║
+ * ║      stay native.                                                ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
@@ -84,10 +88,12 @@ import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import FileChips from './FileChips.jsx'
 import { ArrowUp, DoubleChevronRight, Stop } from '@openai/apps-sdk-ui/components/Icon'
 import {
-  composerHistoryNativeProbe,
+  composerHistoryDirection,
+  composerHistoryKeyPlan,
   composerHistoryProbeReachedBoundary,
-  resolveComposerHistoryMove,
 } from './composerHistory.js'
+import useComposerHistory from './hooks/useComposerHistory.js'
+import ComposerHistoryStrip from './ComposerHistoryStrip.jsx'
 import {
   isPlainTextPasteShortcut,
   resolveComposerEnterAction,
@@ -160,7 +166,7 @@ export function PrimaryActionGlyphs({ action }) {
 
 function PrimaryAction({
   sending, listening, hasInput, hasUploading, showSteer, steerReady,
-  submissionBlocked, questionBlocked,
+  submissionBlocked, questionBlocked, sendLabel = 'Send',
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
   if (!questionBlocked && sending && !hasInput && showSteer) {
@@ -219,7 +225,7 @@ function PrimaryAction({
         onPointerDown={(e) => e.preventDefault()}
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
-        aria-label="Send"
+        aria-label={sendLabel}
         // Offline is deliberately NOT a disable here. A send composed offline is
         // recorded in the durable outbox (chatOutbox) and auto-replays on
         // reconnect, so the button must reach doSend just like the Enter path
@@ -305,7 +311,15 @@ function PrimaryAction({
  *   questionBlocked    — true while an unanswered owner question holds the
  *                        turn; the draft stays editable and Stop owns the
  *                        primary action until the card is answered.
- *   messageHistory     — visible owner-authored message text, oldest first.
+ *   messageHistory     — sent owner messages as composerHistory entries,
+ *                        oldest first (composerHistoryFromMessages).
+ *   queuedMessages     — visible queued rows; ↑ and the pencil open them here.
+ *   onSaveQueued       — the queue's save, (cid, text) → outcome string.
+ *   queuedComposerRef  — caller-owned ref. The bar installs
+ *                        `{ open(cid), discard(cid) }` so the queue tray's
+ *                        pencil and × reach the chat box.
+ *   onQueuedInComposerChange — receives the cid of the queued message the
+ *                        box is editing, or null, for the tray's tag.
  *   provider           — the chat's provider id ('claude' | 'codex'). Filters
  *                        the "/" menu to commands that actually dispatch on it;
  *                        provider-specific commands stay hidden while unknown.
@@ -345,12 +359,14 @@ export default function ChatInputBar({
   attachTriggerRef,
   attachmentsDisabled = false,
   messageHistory = [],
+  queuedMessages = [],
+  onSaveQueued,
+  queuedComposerRef,
+  onQueuedInComposerChange,
   provider,
   projectRef = null,
 }) {
   const fileInputRef = useRef(null)
-  const historyIndexRef = useRef(null)
-  const historyDraftRef = useRef('')
   const pendingComposerCaretRef = useRef(null)
   const historyProbeVersionRef = useRef(0)
   const pasteAsPlainTextRef = useRef(false)
@@ -422,7 +438,7 @@ export default function ChatInputBar({
   function acceptFileMention(file) {
     if (!file || !mention) return
     const next = applyFileMention(input, mention, mentionAgentPath(projectRef?.root_path, file.path))
-    resetMessageHistory()
+    noteComposerEdit()
     if (listeningRef?.current) onManualVoiceEdit?.(next)
     onInputChange(next)
     focusComposerElement(inputRef?.current)
@@ -453,20 +469,65 @@ export default function ChatInputBar({
     }
   }, [attachTriggerRef, attachmentsDisabled, inputRef])
 
-  function resetMessageHistory() {
+  // Typing, dictation, paste, and the menus edit whatever the box holds — the
+  // draft or a browsed message — without leaving history (contract 8).
+  function noteComposerEdit() {
     historyProbeVersionRef.current += 1
-    historyIndexRef.current = null
-    historyDraftRef.current = ''
     pendingComposerCaretRef.current = null
+    composerHistory.noteEdit()
   }
 
-  // Never carry a traversal or its saved draft into another chat. History
-  // list refreshes deliberately do not reset this: a queued message can move
-  // into the transcript while the owner is browsing, and that must not erase
-  // the draft that Down will restore.
+  // History moves, queued saves, and the returning draft all put text in the
+  // box through this one path, with the same voice rebase and controlled
+  // caret handoff as other programmatic edits.
+  function showComposerValue(value) {
+    historyProbeVersionRef.current += 1
+    pendingComposerCaretRef.current = { value, caret: value.length }
+    if (listeningRef?.current) {
+      onManualVoiceEdit?.(value)
+    }
+    onInputChange(value)
+    // Moving between entries can resolve to the value already shown, so React
+    // may not commit a render for the caret layout effect below.
+    const textarea = inputRef?.current
+    if (textarea && textarea.value === value) {
+      try { textarea.setSelectionRange(value.length, value.length) } catch {}
+      pendingComposerCaretRef.current = null
+    }
+  }
+
+  // The hook resets itself when the chat changes, so a traversal or its saved
+  // draft never carries into another chat. History list refreshes do not
+  // reset it: a queued message can start while the owner is browsing, and that
+  // must not erase the draft that Down will restore.
+  const composerHistory = useComposerHistory({
+    chatId,
+    value: input,
+    sentHistory: messageHistory,
+    queuedMessages,
+    showValue: showComposerValue,
+    saveQueued: onSaveQueued,
+  })
+  const { open: openInComposer, discard: discardFromComposer } = composerHistory
+
+  // The queue tray is ChatView's sibling of this bar; its pencil and × reach
+  // the box through this caller-owned ref, like attachTriggerRef above.
+  useLayoutEffect(() => {
+    if (!queuedComposerRef) return undefined
+    queuedComposerRef.current = {
+      open: (cid) => {
+        openInComposer(cid)
+        // Focus inside the tap so iOS keeps (or raises) the soft keyboard.
+        focusComposerElement(inputRef?.current)
+      },
+      discard: discardFromComposer,
+    }
+    return () => { queuedComposerRef.current = null }
+  }, [queuedComposerRef, openInComposer, discardFromComposer, inputRef])
+
   useEffect(() => {
-    resetMessageHistory()
-  }, [chatId])
+    onQueuedInComposerChange?.(composerHistory.queuedKey)
+  }, [composerHistory.queuedKey, onQueuedInComposerChange])
 
   // Programmatic composer edits arrive through the controlled value boundary.
   // Restore their caret after React commits without changing focus or scroll.
@@ -526,7 +587,7 @@ export default function ChatInputBar({
 
   function handleTextareaChange(e) {
     const value = e.target.value
-    resetMessageHistory()
+    noteComposerEdit()
     if (listeningRef?.current) onManualVoiceEdit?.(value)
     onInputChange(value)
     onInputIntent?.(e.nativeEvent)
@@ -564,7 +625,7 @@ export default function ChatInputBar({
         selectionEnd,
         pastedText,
       )
-      resetMessageHistory()
+      noteComposerEdit()
       pendingComposerCaretRef.current = next
       if (listeningRef?.current) onManualVoiceEdit?.(next.value)
       onInputChange(next.value)
@@ -578,7 +639,7 @@ export default function ChatInputBar({
   function acceptSlashCommand(command) {
     if (!command || !slashCommandIsAvailable(command, provider)) return
     const value = applySlashCommand(command)
-    resetMessageHistory()
+    noteComposerEdit()
     if (listeningRef?.current) onManualVoiceEdit?.(value)
     onInputChange(value)
     // The textarea never lost focus (rows suppress pointerdown), but a click
@@ -624,66 +685,42 @@ export default function ChatInputBar({
       return
     }
 
-    function applyHistoryMove(historyMove) {
-      historyIndexRef.current = historyMove.index
-      historyDraftRef.current = historyMove.draft
-      pendingComposerCaretRef.current = {
-        value: historyMove.value,
-        caret: historyMove.value.length,
-      }
-      if (listeningRef?.current) {
-        onManualVoiceEdit?.(historyMove.value)
-      }
-      onInputChange(historyMove.value)
-      // At the oldest entry another Up resolves to the same controlled value,
-      // so React may not commit a render for the layout effect above.
-      if (historyMove.value === input) {
-        try {
-          inputRef?.current?.setSelectionRange(
-            historyMove.value.length,
-            historyMove.value.length,
-          )
-        } catch {}
-        pendingComposerCaretRef.current = null
-      }
-    }
-
-    const historyMove = resolveComposerHistoryMove(e, {
-      history: messageHistory,
-      index: historyIndexRef.current,
-      draft: historyDraftRef.current,
-      value: input,
-    })
-    if (historyMove) {
+    // Esc gives the box back to the draft and drops kept edits. Outside
+    // history it stays native; the menus above already claimed theirs.
+    if (
+      e.key === 'Escape'
+      && composerHistory.browsing
+      && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+      && !e.isComposing && !e.nativeEvent?.isComposing
+    ) {
       e.preventDefault()
-      applyHistoryMove(historyMove)
+      composerHistory.escape()
       return
     }
 
-    const historyProbe = composerHistoryNativeProbe(e, {
-      history: messageHistory,
-      index: historyIndexRef.current,
+    const historyDirection = composerHistoryDirection(e)
+    const historyPlan = historyDirection && composerHistoryKeyPlan(e, {
+      direction: historyDirection,
       value: input,
     })
-    if (historyProbe) {
+    if (historyPlan?.when === 'now') {
+      if (composerHistory.move(historyDirection)) e.preventDefault()
+      return
+    }
+    const canMoveHistory = historyDirection === 'older'
+      ? composerHistory.hasEntries
+      : composerHistory.browsing
+    if (historyPlan?.when === 'after-native' && canMoveHistory) {
+      // Let the browser move the caret first; switch only if it was already
+      // on the edge line. A later edit or move invalidates this probe.
+      const probe = historyPlan.probe
       const probeVersion = ++historyProbeVersionRef.current
       requestAnimationFrame(() => {
-        const textarea = inputRef?.current
         if (
           historyProbeVersionRef.current !== probeVersion
-          || !composerHistoryProbeReachedBoundary(historyProbe, textarea)
+          || !composerHistoryProbeReachedBoundary(probe, inputRef?.current)
         ) return
-        const deferredMove = resolveComposerHistoryMove({
-          key: 'ArrowUp',
-          target: textarea,
-        }, {
-          history: messageHistory,
-          index: historyIndexRef.current,
-          draft: historyDraftRef.current,
-          value: input,
-          nativeBoundary: true,
-        })
-        if (deferredMove) applyHistoryMove(deferredMove)
+        composerHistory.move(historyDirection)
       })
       return
     }
@@ -697,33 +734,39 @@ export default function ChatInputBar({
     })
     if (!action) return
     e.preventDefault()
-    if (action === 'steer') {
-      resetMessageHistory()
-      onSteer()
+    if (action === 'submit' || action === 'submit-steer') {
+      submitComposer(e, { steer: action === 'submit-steer' })
       return
     }
-    if (action === 'submit-steer') {
-      if (canSubmit) {
-        resetMessageHistory()
-        onSubmitSteer(e)
-      }
+    // An empty box asks to steer queued work — unless a message is open here:
+    // then Enter belongs to that message (an empty queued edit explains why
+    // it can't be saved).
+    if (composerHistory.browsing) {
+      if (composerHistory.position?.kind === 'queued') composerHistory.submit()
       return
     }
-    if (action === 'submit') {
-      if (canSubmit) {
-        resetMessageHistory()
-        onSubmit(e)
-      }
-    }
+    if (action === 'steer') onSteer()
   }
 
-  function handleSubmit(e) {
-    if (!canSubmit) {
+  // Enter and the send button. A queued message open here is saved in place
+  // of the original; anything else is sent as a new message, and a draft set
+  // aside by history comes back once that send clears the box.
+  function submitComposer(e, { steer = false } = {}) {
+    const savesQueued = composerHistory.position?.kind === 'queued'
+    if (!savesQueued && !canSubmit) {
       e?.preventDefault?.()
       return
     }
-    resetMessageHistory()
-    onSubmit(e)
+    if (composerHistory.submit() === 'handled') {
+      e?.preventDefault?.()
+      return
+    }
+    if (steer) onSubmitSteer(e)
+    else onSubmit(e)
+  }
+
+  function handleSubmit(e) {
+    submitComposer(e)
   }
 
   const hasFiles = !!pendingFiles?.length
@@ -776,6 +819,13 @@ export default function ChatInputBar({
         listId={mentionListId}
         optionId={mentionOptionId}
       />
+      <ComposerHistoryStrip
+        position={composerHistory.position}
+        note={composerHistory.note}
+        saving={composerHistory.saving}
+        touch={isTouchPrimary()}
+        onBack={composerHistory.escape}
+      />
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
@@ -826,6 +876,7 @@ export default function ChatInputBar({
               steerReady={steerReady}
               submissionBlocked={submissionBlocked}
               questionBlocked={questionBlocked}
+              sendLabel={composerHistory.position?.kind === 'queued' ? 'Save queued message' : 'Send'}
               onSubmit={handleSubmit}
               onStop={onStop}
               onSteer={onSteer}

@@ -1,36 +1,31 @@
+// Queued messages are edited in the chat box; the tray only points there.
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { createServer } from 'vite'
 
-import { restoreQueuedEditorAfterSave } from '../queuedEditorFocus.js'
+const vite = await createServer({ appType: 'custom', logLevel: 'error',
+  server: { middlewareMode: true, hmr: false, ws: false },
+  ssr: { noExternal: ['@openai/apps-sdk-ui'] },
+})
+after(() => vite.close())
+const { default: QueuedMessages } = await vite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx')
 
+const items = [
+  { cid: 'q1', content: 'Then check the dark theme' },
+  { cid: 'q2', content: 'Also update the changelog' },
+]
 
-test('a failed queued-message save returns focus to the active editor', () => {
-  const calls = []
-  const editor = { focus: options => calls.push(options) }
-
-  assert.equal(restoreQueuedEditorAfterSave('error', editor), true)
-  assert.deepEqual(calls, [{ preventScroll: true }])
+test('the queued message open in the chat box is tagged instead of offering the pencil', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, { items, inComposerCid: 'q2' }))
+  assert.match(html, /queued__row queued__row--in-composer[^>]*>[\s\S]*Also update the changelog[\s\S]*In the chat box/)
+  assert.equal(html.match(/aria-label="Edit queued message"/g)?.length, 1,
+    'only the other row keeps its pencil')
 })
 
-
-test('a successful queued-message save does not refocus its removed editor', () => {
-  let focused = false
-  const editor = { focus: () => { focused = true } }
-
-  assert.equal(restoreQueuedEditorAfterSave('saved', editor), false)
-  assert.equal(focused, false)
-})
-
-
-test('queued-editor focus falls back for older browsers', () => {
-  let calls = 0
-  const editor = {
-    focus: options => {
-      calls += 1
-      if (options) throw new TypeError('focus options unsupported')
-    },
-  }
-
-  assert.equal(restoreQueuedEditorAfterSave('gone', editor), true)
-  assert.equal(calls, 2)
+test('the tray never renders its own editor', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, { items }))
+  assert.doesNotMatch(html, /<textarea/)
+  assert.equal(html.match(/aria-label="Edit queued message"/g)?.length, 2)
 })
