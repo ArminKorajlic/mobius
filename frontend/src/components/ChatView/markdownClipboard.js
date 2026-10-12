@@ -1,7 +1,7 @@
-/** Clipboard contract for rendered assistant prose.
+/** Clipboard contract for rendered chat prose: replies and owner messages.
  *
  * Copy keeps native selection, but replaces the clipboard payload with two
- * representations of the selected assistant text:
+ * representations of the selected text:
  *   - text/markdown: source Markdown (or an equivalent serialization when the
  *     selection cuts through only part of a rendered block)
  *   - text/plain: the same selection without Markdown punctuation
@@ -266,10 +266,10 @@ function cloneRangeWithContext(range, block) {
   return selected
 }
 
-function selectedAssistantPayload(root, selection, markdownForBlock) {
+function selectedMarkdownPayload(root, selection, markdownForBlock) {
   if (!root || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null
   const range = selection.getRangeAt(0)
-  const blocks = Array.from(root.querySelectorAll('[data-assistant-markdown-block]'))
+  const blocks = Array.from(root.querySelectorAll('[data-markdown-block]'))
     .filter(block => rangeIntersectsNode(range, block))
   if (blocks.length === 0) return null
 
@@ -305,10 +305,10 @@ export function markdownClipboardHtml(markdown, plainText) {
   return `<span ${MARKDOWN_CARRIER_ATTR}="${encoded}">${escapeHtml(plainText).replace(/\n/g, '<br>')}</span>`
 }
 
-/** React onCopy handler used by the response-level copy surface. */
-export function copyAssistantSelection(event, markdownForBlock) {
+/** React onCopy handler used by the message-level Markdown copy surface. */
+export function copyMarkdownSelection(event, markdownForBlock) {
   const selection = event.currentTarget?.ownerDocument?.getSelection?.()
-  const payload = selectedAssistantPayload(event.currentTarget, selection, markdownForBlock)
+  const payload = selectedMarkdownPayload(event.currentTarget, selection, markdownForBlock)
   if (!payload || !event.clipboardData) return false
 
   let plainWritten = false
@@ -370,8 +370,10 @@ export function insertClipboardText(value, selectionStart, selectionEnd, text) {
  * the replacement to the textarea's native undo stack. The command emits the
  * normal input event, so React's existing onChange path remains the sole owner
  * of composer state. It must run just after the cancelled paste event; running
- * it inside that event makes Chromium discard the edit's undo transaction. */
-export function queueClipboardTextUndoably(textarea, text, onRejected) {
+ * it inside that event makes Chromium discard the edit's undo transaction.
+ * Formatting shortcuts reuse the same edit; `onInserted` runs right after a
+ * native insert so they can select the text the owner will type over. */
+export function queueClipboardTextUndoably(textarea, text, onRejected, onInserted) {
   const document = textarea?.ownerDocument
   const queueMicrotask = document?.defaultView?.queueMicrotask
   if (
@@ -385,7 +387,8 @@ export function queueClipboardTextUndoably(textarea, text, onRejected) {
     try {
       inserted = document.execCommand('insertText', false, String(text || ''))
     } catch { /* the controlled fallback below preserves paste itself */ }
-    if (!inserted) onRejected?.()
+    if (inserted) onInserted?.()
+    else onRejected?.()
   })
   return true
 }

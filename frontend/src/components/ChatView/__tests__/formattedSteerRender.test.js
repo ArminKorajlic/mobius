@@ -214,7 +214,7 @@ function copyWholeFragment(msg, visibleText) {
   const paragraph = { nodeType: 1, tagName: 'P', childNodes:
     msg.content.includes('![diagram]') ? [image, strong] : [strong] }
   const fragment = { nodeType: 11, childNodes: [paragraph] }
-  const block = { dataset: { assistantMarkdownBlock: '0' }, contains: () => true }
+  const block = { dataset: { markdownBlock: '0' }, contains: () => true }
   const range = {
     startContainer: block, endContainer: block, commonAncestorContainer: block,
     startOffset: 0, endOffset: 1, collapsed: false,

@@ -71,7 +71,7 @@ test('goal owner messages hide only a real command token and preserve objective 
   )
   assert.equal(goalMessageObjectiveFromText('please /goal later'), '')
   assert.equal(goalMessageObjectiveFromText('/goal clear'), '')
-  assert.match(msgContent, /<UserMessageText text=\{text\} \/>/)
+  assert.match(msgContent, /<UserMessageText\s+text=\{text\}/)
   assert.match(msgContent, /className="chat__goal-message-tag" aria-hidden="true">Goal<\/span>/)
   assert.match(msgContent, /className="chat__sr-only">Goal: <\/span>/)
   assert.match(chatCss, /\.chat__goal-message\s*\{[\s\S]*?display: inline;/)

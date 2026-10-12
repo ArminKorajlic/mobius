@@ -187,11 +187,27 @@ test('Markdown insertion can fall back when the browser rejects native editing',
   assert.equal(rejected, 1)
 })
 
-test('assistant prose and the composer share the Markdown clipboard boundary', () => {
+test('a formatting edit selects its text only after the native insert lands', () => {
+  for (const accepted of [true, false]) {
+    const events = []
+    let runQueued
+    assert.equal(queueClipboardTextUndoably({
+      ownerDocument: {
+        defaultView: { queueMicrotask: callback => { runQueued = callback } },
+        execCommand: () => { events.push('insert'); return accepted },
+      },
+    }, '**text**', () => events.push('fallback'), () => events.push('select')), true)
+    assert.deepEqual(events, [], 'nothing runs inside the keydown itself')
+    runQueued()
+    assert.deepEqual(events, accepted ? ['insert', 'select'] : ['insert', 'fallback'])
+  }
+})
+
+test('chat prose and the composer share the Markdown clipboard boundary', () => {
   const message = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
   const composer = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
-  assert.match(message, /onCopy=\{\(event\) => copyAssistantSelection\(event, markdownForBlock\)\}/)
-  assert.match(message, /data-assistant-markdown-block=/)
+  assert.match(message, /onCopy=\{\(event\) => copyMarkdownSelection\(event, markdownForBlock\)\}/)
+  assert.match(message, /data-markdown-block=/)
   assert.match(message, /if \(markdownByIndex\) return markdownByIndex\.get\(index\) \?\? ''/,
     'a partial cold render must not fall back to the hidden full message source')
   assert.match(composer, /assistantClipboardText\(\s*e\.clipboardData,\s*preferPlainText/)
