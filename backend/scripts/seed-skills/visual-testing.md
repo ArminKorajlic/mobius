@@ -148,19 +148,34 @@ and that raising the server's memory to 2 GB would make it possible. Keep
 using the default browser for everything else. If the owner still asks you
 to try, warn once, then proceed.
 
-Use full Chrome in its own session and throwaway profile, so the default
-session keeps its identity, and close it when done:
+Use full Chrome in its own session with a throwaway profile named after that
+session, so the default session keeps its identity and no other session
+shares the profile. Shell state does not carry between commands: repeat the
+definitions (everything above `full open`) in every command that uses full
+Chrome. They always resolve to the same session and profile.
 
 ```bash
 FULL_CHROME="$(ls -d /opt/agent-browser/browsers/chrome-*/chrome | head -n 1)"
+FULL_SESSION="$AGENT_BROWSER_SESSION-full"
+FULL_PROFILE="$TMPDIR/agent-browser-$FULL_SESSION"
 full() {
-  AGENT_BROWSER_SESSION="$AGENT_BROWSER_SESSION-full" \
-  AGENT_BROWSER_PROFILE="$TMPDIR/full-chrome-profile" \
+  AGENT_BROWSER_SESSION="$FULL_SESSION" \
+  AGENT_BROWSER_PROFILE="$FULL_PROFILE" \
   AGENT_BROWSER_EXECUTABLE_PATH="$FULL_CHROME" agent-browser "$@"
 }
 full open <url>
-full close   # if it hangs: python3 "$SCRIPTS_DIR/agent_browser_session_reset.py" "$TMPDIR/full-chrome-profile"
 ```
+
+When done, close it, confirm nothing still uses the profile, then delete the
+profile. If `full close` hangs, stop it and run only the second line:
+
+```bash
+full close
+python3 "$SCRIPTS_DIR/agent_browser_session_reset.py" "$FULL_PROFILE" \
+  && rm -rf "$FULL_PROFILE"
+```
+
+If the reset fails, leave the profile in place and name it for the next agent.
 
 ## Close the browser session when you are done
 
