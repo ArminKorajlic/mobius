@@ -1,5 +1,7 @@
 """Routes for chat CRUD operations."""
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -9,7 +11,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
@@ -3081,10 +3083,15 @@ class SideQuestionKeep(BaseModel):
   provider: Literal["claude"]
 
 
+# How often the ``/btw`` route checks whether its client is still there.
+_SIDE_QUESTION_DISCONNECT_POLL_SECS = 1.0
+
+
 @router.post("/{chat_id}/btw", dependencies=[Depends(reject_cross_site)])
 async def ask_chat_side_question(
   chat_id: str,
   body: SideQuestionAsk,
+  request: Request,
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
@@ -3104,10 +3111,33 @@ async def ask_chat_side_question(
     raise HTTPException(exc.status_code, exc.message) from exc
   # The fork can take minutes; it must not hold a database connection.
   db.close()
+  # Closing the card aborts the browser request, but an ASGI disconnect does
+  # not cancel this handler by itself. Watch for it and cancel the fork — its
+  # CancelledError path kills the fork's process group — so a closed card
+  # frees the chat's one side-question slot instead of running the fork out
+  # to its timeout.
+  answer_task = asyncio.create_task(
+    side_questions.answer_side_question(plan, get_settings().data_dir),
+  )
   try:
-    answer = await side_questions.answer_side_question(plan, get_settings().data_dir)
+    while True:
+      done, _pending = await asyncio.wait(
+        {answer_task}, timeout=_SIDE_QUESTION_DISCONNECT_POLL_SECS,
+      )
+      if done:
+        break
+      if await request.is_disconnected():
+        raise HTTPException(
+          499, "The side question was closed before it was answered.",
+        )
+    answer = answer_task.result()
   except side_questions.SideQuestionError as exc:
     raise HTTPException(exc.status_code, exc.message) from exc
+  finally:
+    if not answer_task.done():
+      answer_task.cancel()
+      with contextlib.suppress(asyncio.CancelledError):
+        await answer_task
   return {
     "question": answer.question,
     "answer": answer.answer,

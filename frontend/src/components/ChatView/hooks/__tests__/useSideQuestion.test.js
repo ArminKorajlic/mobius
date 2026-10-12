@@ -140,6 +140,19 @@ test('a successful add still reconciles the transcript after the card closed', a
   assert.equal(hook.result.current.sideQuestion, null)
 })
 
+test('an add finishing after a chat switch does not refresh the chat now on screen', async t => {
+  const { hook, asks, keeps, added } = setup(t)
+  const asking = hook.result.current.ask('what runs?')
+  asks[0].resolve(Response.json(answer))
+  await asking
+  const adding = hook.result.current.add()
+  hook.rerender({ chatId: 'chat-b', onAdded: () => added.push('refreshed the chat on screen') })
+  keeps[0].resolve(Response.json({ stored: { cid: keeps[0].payload.cid } }))
+  await adding
+  assert.equal(keeps[0].chatId, 'chat-a', 'the write belongs to the originating chat')
+  assert.deepEqual(added, [], 'chat-a reconciles when it reopens, not through chat-b')
+})
+
 test('the server says why a question could not be answered, and Try again asks again', async t => {
   const { hook, asks } = setup(t)
   const asking = hook.result.current.ask('what runs?')

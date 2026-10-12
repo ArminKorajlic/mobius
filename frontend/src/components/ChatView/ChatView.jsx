@@ -83,7 +83,7 @@ import { composerAdjacentActionProps } from './composerAdjacentAction.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import CompactionProgress from './CompactionProgress.jsx'
 import useCompactCommands from './hooks/useCompactCommands.js'
-import { mobiusChatCommand } from './slashCommands.js'
+import { chatCommandRejection, mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ContextPanel from './ContextPanel.jsx'
@@ -4140,7 +4140,11 @@ export default function ChatView({
   function dispatchMobiusChatCommand(composed) {
     const command = mobiusChatCommand(composed)
     if (!command) return false
-    if (command.action === 'compact') {
+    const rejection = chatCommandRejection(command)
+    if (rejection) {
+      // The command is consumed but nothing runs; the typed text stays.
+      setSendFailure(rejection)
+    } else if (command.action === 'compact') {
       void runCompactCommand(command.argument, composed)
     } else if (command.action === 'new') {
       void startNewChatFromCommand(command.argument, composed)

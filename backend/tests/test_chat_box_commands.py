@@ -236,6 +236,40 @@ def test_a_side_question_that_runs_too_long_is_stopped_and_reported(db, chat, fa
   assert chat.id not in side_questions._ANSWERING
 
 
+def test_a_closed_card_cancels_the_fork_and_frees_the_chat(db, chat, fake_fork, tmp_path, monkeypatch):
+  """An ASGI disconnect does not cancel a handler by itself: the /btw route
+  watches for it and cancels the fork, so closing the card frees the chat's
+  side-question slot instead of running the fork to its timeout."""
+  from types import SimpleNamespace
+
+  from fastapi import HTTPException
+
+  from app.routes import chats as chats_routes
+
+  fake_fork("time.sleep(30)")
+  _with_session(db, chat)
+  monkeypatch.setattr(chats_routes, "_SIDE_QUESTION_DISCONNECT_POLL_SECS", 0.05)
+  monkeypatch.setattr(
+    chats_routes, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)),
+  )
+
+  class ClosedCard:
+    async def is_disconnected(self):
+      # The owner closes the card as soon as the fork is running.
+      return chat.id in side_questions._ANSWERING
+
+  started = time.monotonic()
+  with pytest.raises(HTTPException) as closed:
+    asyncio.run(chats_routes.ask_chat_side_question(
+      chat.id, chats_routes.SideQuestionAsk(question="what runs?"),
+      ClosedCard(), None, db,
+    ))
+
+  assert closed.value.status_code == 499
+  assert time.monotonic() - started < 10, "the fork was killed, not run out"
+  assert chat.id not in side_questions._ANSWERING
+
+
 def test_only_one_side_question_runs_per_chat(db, chat, fake_fork, tmp_path):
   fake_fork('time.sleep(1); print(json.dumps({"answer": "done"}))')
   _with_session(db, chat)

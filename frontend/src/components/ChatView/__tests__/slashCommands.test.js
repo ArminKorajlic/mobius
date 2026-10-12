@@ -5,6 +5,7 @@ import {
   MOBIUS_CHAT_COMMANDS,
   SLASH_COMMANDS,
   applySlashCommand,
+  chatCommandRejection,
   compactFailureInput,
   mobiusChatCommand,
   fuzzyScore,
@@ -187,6 +188,17 @@ test('/context and /btw are chat actions; /btw carries its question', () => {
   assert.deepEqual(mobiusChatCommand('/btw what do the Kanban tests cover?'), {
     name: '/btw', action: 'btw', argument: 'what do the Kanban tests cover?',
   })
+})
+
+test('/context with trailing text is rejected with an explanation, not discarded', () => {
+  const command = mobiusChatCommand('/context why is this full?')
+  assert.equal(command.action, 'context')
+  assert.match(chatCommandRejection(command), /takes no text/,
+    'running it anyway would silently discard the trailing words')
+  assert.equal(chatCommandRejection(mobiusChatCommand('/context')), null)
+  assert.equal(chatCommandRejection(mobiusChatCommand('/btw why is this full?')), null,
+    'commands that take text keep taking it')
+  assert.equal(chatCommandRejection(null), null)
 })
 
 test('typing an alias offers its command under the alias and accepting keeps it', () => {

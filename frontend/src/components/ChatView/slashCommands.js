@@ -102,6 +102,18 @@ export function mobiusChatCommand(text) {
   return { name: match[1], action, argument: (match[2] || '').trim() }
 }
 
+/**
+ * Why `command` cannot run as typed, or null when it can. `/context` opens
+ * the context breakdown and takes no text: running it anyway would silently
+ * discard the trailing words, so the composer keeps them and shows this.
+ */
+export function chatCommandRejection(command) {
+  if (command?.action === 'context' && command.argument) {
+    return '‘/context’ takes no text after it. Your message stays in the box.'
+  }
+  return null
+}
+
 /** Restore a failed compact command unless the owner has already typed anew. */
 export function compactFailureInput(currentInput, submittedInput) {
   return currentInput || submittedInput

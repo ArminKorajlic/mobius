@@ -23,7 +23,9 @@ export function sideQuestionFailure(error) {
  * its `cid`, so it cannot save twice. A successful add always reconciles the
  * transcript through `onAdded`, even when its card was closed or replaced
  * while the write was in flight — the row is committed either way, and hiding
- * that would misreport the write as cancelled.
+ * that would misreport the write as cancelled. Only a chat switch skips the
+ * refresh: `onAdded` follows the chat on screen, and the committed row is
+ * read back when its own chat reopens.
  */
 export default function useSideQuestion({ chatId, onAdded }) {
   const [sideQuestion, setSideQuestion] = useState(null)
@@ -33,6 +35,8 @@ export default function useSideQuestion({ chatId, onAdded }) {
   currentRef.current = sideQuestion
   const onAddedRef = useRef(onAdded)
   onAddedRef.current = onAdded
+  const chatIdRef = useRef(chatId)
+  chatIdRef.current = chatId
 
   const abandon = useCallback(() => {
     requestRef.current += 1
@@ -90,8 +94,10 @@ export default function useSideQuestion({ chatId, onAdded }) {
         answer: card.answer,
         provider: card.provider,
       }), 'Adding the side question failed')
-      // The row is committed: show it regardless of what happened to the card.
-      onAddedRef.current?.()
+      // The row is committed: show it regardless of what happened to the
+      // card. After a chat switch, though, the latest `onAdded` follows the
+      // chat now on screen — skip it rather than refresh the wrong chat.
+      if (chatIdRef.current === chatId) onAddedRef.current?.()
       if (requestRef.current !== card.request) return
       requestRef.current += 1
       setSideQuestion(null)

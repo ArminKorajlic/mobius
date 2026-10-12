@@ -172,6 +172,12 @@
   filter: none;
 }
 
+/* Touch needs the 44px target on any width — tablets included, where the
+   narrow-width rule below never applies. */
+@media (pointer: coarse) {
+  .side-question__actions .side-question__button { min-height: 44px; }
+}
+
 @media (max-width: 520px) {
   .side-question__actions .side-question__button { flex: 1; min-height: 44px; }
 }
