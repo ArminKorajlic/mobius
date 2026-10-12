@@ -39,6 +39,7 @@ SUPPORTED_PROTOCOL_VERSIONS = {
 PROMOTE_GOAL_TOOL = "promote_goal"
 UPDATE_GOAL_TOOL = "update_goal"
 READ_GOAL_TOOL = "read_goal"
+UPDATE_GOAL_TASKS_TOOL = "update_goal_tasks"
 DECLARE_WAIT_TOOL = "declare_wait"
 CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
@@ -103,7 +104,7 @@ OWNER_TOOLS = (
 )
 DELEGATED_TOOLS = (
   *HELPER_TOOLS, ASK_PARENT_TOOL, *PEER_TOOLS, *WORK_OWNERSHIP_TOOLS,
-  CHECKPOINT_CHAT_TOOL, READ_GOAL_TOOL, *APP_TOOLS,
+  CHECKPOINT_CHAT_TOOL, READ_GOAL_TOOL, UPDATE_GOAL_TASKS_TOOL, *APP_TOOLS,
 )
 # A helper turn's identity when it runs inside a shared helper host: the
 # process environment belongs to the whole host, so the turn's own values
@@ -591,6 +592,17 @@ def _call_update_goal(arguments: dict[str, Any]) -> str:
   return _update_goal(arguments)
 
 
+def _call_update_goal_tasks(arguments: dict[str, Any]) -> dict:
+  if set(arguments) != {"tasks"}:
+    raise ValueError("update_goal_tasks needs only tasks")
+  chat_id = os.environ.get("CHAT_ID") or ""
+  if not chat_id:
+    raise RuntimeError("missing environment: CHAT_ID")
+  return _agent_api_call(
+    "POST", f"/api/chats/{quote(chat_id, safe='')}/goal/tasks", arguments,
+  )
+
+
 def _call_read_goal(arguments: dict[str, Any]) -> dict:
   unknown = set(arguments) - {"task"}
   if unknown:
@@ -1037,7 +1049,7 @@ def _call_message_agent(arguments: dict[str, Any]) -> dict:
       else "Answer delivered; the helper resumes and its result arrives in this chat by itself."
     )
   else:
-    view["note"] = "Follow-up started; its result arrives in this chat by itself."
+    view["note"] = "Follow-up accepted; its result or failure returns to this chat automatically unless the work is stopped or held."
   return view
 
 
@@ -1247,7 +1259,14 @@ def _call_apply_app(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 SCREENSHOT_SCRIPT = Path(__file__).with_name("agent-screenshot.sh")
-SCREENSHOT_TIMEOUT_SECONDS = 150
+# A capture makes up to 29 browser commands, and a loaded 1 GB server takes
+# ~5 s per command, so a healthy capture there needs ~150 s before pauses or
+# its one reset. The control server allows a tool far longer than this.
+SCREENSHOT_TIMEOUT_SECONDS = 240
+# The helper bounds its whole capture by the time this tool can wait, less a
+# margin for its final kill, cleanup, and report, so a too-busy machine yields
+# the helper's own explanation instead of this tool's bare timeout.
+SCREENSHOT_CAPTURE_BUDGET_SECONDS = SCREENSHOT_TIMEOUT_SECONDS - 10
 
 
 def _call_screenshot(arguments: dict[str, Any]) -> ToolContent:
@@ -1275,6 +1294,10 @@ def _call_screenshot(arguments: dict[str, Any]) -> ToolContent:
   try:
     done = subprocess.run(
       command, capture_output=True, text=True, timeout=SCREENSHOT_TIMEOUT_SECONDS,
+      env={
+        **os.environ,
+        "MOBIUS_SCREENSHOT_BUDGET_SECONDS": str(SCREENSHOT_CAPTURE_BUDGET_SECONDS),
+      },
     )
   except subprocess.TimeoutExpired as exc:
     raise RuntimeError("screenshot timed out; nothing was captured") from exc
@@ -1370,7 +1393,9 @@ _TOOL_DEFINITIONS = {
     "description": (
       "Give a finished helper a follow-up task, or answer a needs_input "
       "helper's question with its question_id. It keeps its full history and bounded task scope, "
-      "and its new result arrives in this chat by itself. A helper that is "
+      "and its new result arrives in this chat by itself. Closed or held work "
+      "cannot receive new follow-ups: use spawn_agent for a new task or Goal, "
+      "rather than reusing its helper. A helper that is "
       "still working cannot receive a follow-up here; wait for its result. "
       "Repeating an answer never starts a second turn. "
       "For a decision-changing note to a live helper, use "
@@ -1770,6 +1795,22 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
+  UPDATE_GOAL_TASKS_TOOL: {
+    "name": UPDATE_GOAL_TASKS_TOOL,
+    "description": (
+      "Update your assigned Goal checklist branch in one batch. Add meaningful "
+      "substeps with parent_id; update their progress, evidence and status. "
+      "No plan approval or progress message is needed. Your assigning parent "
+      "accepts your boundary task: leave it unfinished and return your final "
+      "result normally. You cannot change its objective/constraints, other "
+      "branches or the Goal outcome. Reuse stable task ids; prefer a branch "
+      "prefix for new ids. read_goal expands details when needed."
+    ),
+    "inputSchema": {
+      "type": "object", "properties": {"tasks": _GOAL_TASKS_SCHEMA},
+      "required": ["tasks"], "additionalProperties": False,
+    },
+  },
   READ_GOAL_TOOL: {
     "name": READ_GOAL_TOOL,
     "description": READ_GOAL_DESCRIPTION,
@@ -1966,6 +2007,7 @@ _TOOL_HANDLERS = {
   PROMOTE_GOAL_TOOL: _call_promote_goal,
   UPDATE_GOAL_TOOL: _call_update_goal,
   READ_GOAL_TOOL: _call_read_goal,
+  UPDATE_GOAL_TASKS_TOOL: _call_update_goal_tasks,
   DECLARE_WAIT_TOOL: _call_declare_wait,
   CANCEL_WAIT_TOOL: _call_cancel_wait,
   LIST_AGENT_PEERS_TOOL: _call_list_agent_peers,
