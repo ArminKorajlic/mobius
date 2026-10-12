@@ -344,4 +344,9 @@ test('the history strip\'s back control keeps a 26px well with a 44px tap target
   const hitArea = chatCss.match(/\.chat__history-strip-back::after \{[\s\S]*?\}/)?.[0] || ''
   assert.match(hitArea, /position: absolute;/)
   assert.match(hitArea, /inset: -9px;/, '26px + 2 × 9px = 44px')
+  assert.match(
+    chatCss,
+    /\.chat__foot \.chat__history-strip,[\s\S]*?\{ pointer-events: auto; \}/,
+    'the foot passes pointer events through, so the strip must opt back in or its × cannot be tapped',
+  )
 })
