@@ -59,10 +59,12 @@ export default function useComposerHistory({
   showValueRef.current = showValue
   const saveQueuedRef = useRef(saveQueued)
   saveQueuedRef.current = saveQueued
-  // Armed by a send from history; the composer clearing after that send is
-  // what brings the draft back. A send that never happens leaves the box
-  // untouched, and the next edit disarms it.
-  const draftReturnRef = useRef(false)
+  // Armed by a send from history with the chat that armed it; the composer
+  // clearing after that send is what brings the draft back, in that chat
+  // only — a refused send can leave this armed, and the next chat's empty box
+  // must not inherit the old chat's draft. A send that never happens leaves
+  // the box untouched, and the next edit disarms it.
+  const draftReturnRef = useRef(null)
 
   const commit = useCallback((next) => {
     browseRef.current = next
@@ -71,22 +73,25 @@ export default function useComposerHistory({
 
   const apply = useCallback((transition, extra = null) => {
     if (!transition) return false
-    draftReturnRef.current = false
+    draftReturnRef.current = null
     commit({ ...transition.state, ...(extra || {}), note: null, saving: false })
     showValueRef.current?.(transition.value)
     return true
   }, [commit])
 
   useEffect(() => {
-    draftReturnRef.current = false
+    draftReturnRef.current = null
     commit(COMPOSER_DRAFT_STATE)
   }, [chatId, commit])
 
   useLayoutEffect(() => {
-    if (!draftReturnRef.current || value !== '') return
-    draftReturnRef.current = false
+    // The arming chat must still be on screen: this layout effect sees an
+    // emptied box before the chat-switch reset above runs, and restoring
+    // there would write the old chat's draft into the new chat.
+    if (draftReturnRef.current !== chatId || value !== '') return
+    draftReturnRef.current = null
     apply(returnToComposerDraft(browseRef.current))
-  }, [value, apply])
+  }, [chatId, value, apply])
 
   const move = useCallback((direction) => apply(moveComposerHistory(
     browseRef.current, entriesRef.current, direction, valueRef.current,
@@ -114,7 +119,7 @@ export default function useComposerHistory({
   /** Typing, dictation, paste, or a menu changed the browsed text. The
    * position and draft stay; only a stale note and an armed return clear. */
   const noteEdit = useCallback(() => {
-    draftReturnRef.current = false
+    draftReturnRef.current = null
     const current = browseRef.current
     if (current.note) commit({ ...current, note: null })
   }, [commit])
@@ -171,9 +176,9 @@ export default function useComposerHistory({
       void saveCurrentQueued(position.entry, text)
       return 'handled'
     }
-    draftReturnRef.current = true
+    draftReturnRef.current = chatId
     return 'send'
-  }, [apply, commit, saveCurrentQueued])
+  }, [apply, chatId, commit, saveCurrentQueued])
 
   const position = composerHistoryPosition(browse, entries)
   return {

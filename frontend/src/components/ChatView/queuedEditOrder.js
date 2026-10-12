@@ -5,31 +5,27 @@
  * truth. Anything else done to the same message while that save is in flight
  * would race it: a cancellation could be undone when the late response puts
  * the row back in the tray, and Send now could send the text the edit is
- * replacing. So each message's edits run one after another, and its other
- * actions wait for `settled(cid)` before they start. Messages never wait for
- * each other.
+ * replacing. So EVERY operation on one message — each edit, its cancellation,
+ * its Send now — runs through the same per-message chain, one after another.
+ * A terminal action waits out the edits before it, and an edit opened during
+ * a slow cancellation or Send now waits for that outcome instead of racing
+ * it. Messages never wait for each other.
  */
 export function createQueuedEditOrder() {
-  // cid -> a promise that settles once every edit started so far has settled.
+  // cid -> a promise that settles once every operation started so far settled.
   const tails = new Map()
 
   return {
-    /** Run one edit of a queued message after its earlier edits settle.
-     * Resolves or rejects exactly as `edit()` does. */
-    run(cid, edit) {
-      const result = (tails.get(cid) || Promise.resolve()).then(edit)
+    /** Run one operation on a queued message after its earlier operations
+     * settle. Resolves or rejects exactly as `operation()` does. */
+    run(cid, operation) {
+      const result = (tails.get(cid) || Promise.resolve()).then(operation)
       const tail = result.then(() => {}, () => {})
       tails.set(cid, tail)
       tail.then(() => {
         if (tails.get(cid) === tail) tails.delete(cid)
       })
       return result
-    },
-
-    /** Resolves once every edit of the message started so far has settled,
-     * successfully or not; at once when none is in flight. Never rejects. */
-    settled(cid) {
-      return tails.get(cid) || Promise.resolve()
     },
   }
 }

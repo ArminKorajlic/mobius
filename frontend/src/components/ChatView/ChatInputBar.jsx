@@ -167,13 +167,15 @@ export function PrimaryActionGlyphs({ action }) {
 
 export function PrimaryAction({
   sending, listening, hasInput, hasUploading, showSteer, steerReady,
-  submissionBlocked, questionBlocked, savesQueued = false,
+  submissionBlocked, questionBlocked, savesQueued = false, resendsHistory = false,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
   // A queued message open in the chat box is saved in place. That edits the
   // queue rather than sending, so a running turn, a waiting question card, and
   // the draft's own uploads leave the button to it; the save reports anything
   // that blocks it (an empty edit included) in the history strip.
+  // A recalled sent message resends without the draft's files (`fromHistory`),
+  // so those uploads don't block it either.
   const holdsQueuedEdit = savesQueued && !listening
   if (!holdsQueuedEdit && !questionBlocked && sending && !hasInput && showSteer) {
     return (
@@ -237,7 +239,7 @@ export function PrimaryAction({
         // reconnect, so the button must reach doSend just like the Enter path
         // (canSubmit ignores offline). Gating it on `offline` was a leftover
         // from the old online-only composer and silently swallowed offline taps.
-        disabled={!holdsQueuedEdit && (hasUploading || submissionBlocked)}
+        disabled={!holdsQueuedEdit && ((hasUploading && !resendsHistory) || submissionBlocked)}
       >
         <PrimaryActionGlyphs action="send" />
       </button>
@@ -897,6 +899,7 @@ export default function ChatInputBar({
               submissionBlocked={submissionBlocked}
               questionBlocked={questionBlocked}
               savesQueued={composerHistory.position?.kind === 'queued'}
+              resendsHistory={composerHistory.browsing}
               onSubmit={handleSubmit}
               onStop={onStop}
               onSteer={onSteer}

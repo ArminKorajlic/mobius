@@ -109,6 +109,22 @@ test('resending an earlier message brings the draft back once the send clears th
   assert.equal(box.props.value, 'Also update the README')
 })
 
+test('a chat switch never pulls the old chat’s draft into the new chat’s empty box', () => {
+  const box = mountComposer({ value: 'my draft for the first chat' })
+  box.current.move('older')
+  box.current.move('older')
+  box.current.move('older')
+  assert.equal(box.props.value, 'Add a test for the list menu')
+  assert.equal(box.current.submit(), 'send', 'arms the draft return in chat-1')
+  // The send was refused (say, a file was still uploading), so the box was
+  // never cleared — and the owner switches to a chat whose box is empty.
+  box.props.chatId = 'chat-2'
+  box.props.value = ''
+  box.rerender()
+  assert.equal(box.props.value, '', 'chat-2 keeps its own empty box')
+  assert.equal(box.current.browsing, false)
+})
+
 test('a send that never happens leaves the recalled text and does not return later', () => {
   const box = mountComposer({ value: 'draft' })
   box.current.move('older')

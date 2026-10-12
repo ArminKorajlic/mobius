@@ -1,9 +1,10 @@
 /**
  * Behaviour of the per-message order between queued edits and the other
  * actions on that message (cancel, Send now), driven with deferred saves and
- * the real usePendingQueue. ChatView's handlers use exactly these two calls:
- * handleUpdatePending runs each save through `run`, and handleCancelPending
- * and handleSteerOne await `settled` before they act.
+ * the real usePendingQueue. ChatView's handlers run EVERY operation on one
+ * message through `run`: handleUpdatePending each save, handleCancelPending
+ * the cancellation, handleSteerOne the send — so terminal actions wait out
+ * earlier edits, and later edits wait for a terminal action's outcome.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -43,7 +44,7 @@ test('cancelling a queued message waits for its in-flight edit', async () => {
   const save = deferred()
   const log = []
   const edit = order.run('q1', () => save.promise.then(outcome => { log.push('edit'); return outcome }))
-  const cancel = order.settled('q1').then(() => log.push('cancel'))
+  const cancel = order.run('q1', () => log.push('cancel'))
 
   await turn()
   assert.deepEqual(log, [], 'the cancel holds while the edit is saving')
@@ -56,7 +57,7 @@ test('cancelling a queued message waits for its in-flight edit', async () => {
 test('a late edit response cannot put a cancelled message back in the tray', async () => {
   const order = createQueuedEditOrder()
   const { queue, edit, respond } = queueWithEditInFlight(order)
-  const cancel = order.settled('q1').then(() => queue.current.cancelByCid('q1'))
+  const cancel = order.run('q1', () => queue.current.cancelByCid('q1'))
 
   respond([{ ...ROW, content: EDITED }])
   await edit
@@ -75,13 +76,39 @@ test('a late edit response cannot put a cancelled message back in the tray', asy
 test('Send now sends the saved edit, not the text it replaces', async () => {
   const order = createQueuedEditOrder()
   const { queue, edit, respond } = queueWithEditInFlight(order)
-  const sentText = order.settled('q1').then(() => (
+  const sentText = order.run('q1', () => (
     queue.current.pendingMessagesRef.current.find(row => row.cid === 'q1').content
   ))
 
   respond([{ ...ROW, content: EDITED }])
   await edit
   assert.equal(await sentText, EDITED)
+})
+
+test('an edit opened during a slow cancellation waits for its outcome', async () => {
+  // The reopened pencil's save must not race the DELETE: it runs only after
+  // the cancellation settles, when the queue already reflects the outcome.
+  const order = createQueuedEditOrder()
+  const { result: queue } = renderHook(usePendingQueue)
+  queue.current.hydrate([ROW])
+  const confirm = deferred()
+  const log = []
+  const cancel = order.run('q1', async () => {
+    await confirm.promise
+    queue.current.cancelByCid('q1')
+    log.push('cancelled')
+  })
+  const lateEdit = order.run('q1', () => {
+    log.push(`edit sees ${cids(queue).length ? 'the row' : 'no row'}`)
+    return cids(queue).length ? 'saved' : 'gone'
+  })
+
+  await turn()
+  assert.deepEqual(log, [], 'the edit holds while the cancellation runs')
+  confirm.resolve()
+  await cancel
+  assert.equal(await lateEdit, 'gone', 'the deferred edit saves against the settled outcome')
+  assert.deepEqual(log, ['cancelled', 'edit sees no row'])
 })
 
 test('edits of one message save one after another', async () => {
@@ -92,7 +119,7 @@ test('edits of one message save one after another', async () => {
   const firstEdit = order.run('q1', () => { started.push('first'); return first.promise })
   const secondEdit = order.run('q1', () => { started.push('second'); return second.promise })
   let cancelled = false
-  const cancel = order.settled('q1').then(() => { cancelled = true })
+  const cancel = order.run('q1', () => { cancelled = true })
 
   await turn()
   assert.deepEqual(started, ['first'], 'a newer edit cannot overtake an older one')
@@ -113,17 +140,15 @@ test('a failed edit still releases its message, and other messages never wait', 
   const edit = order.run('q1', () => save.promise)
 
   let otherReady = false
-  order.settled('q2').then(() => { otherReady = true })
+  void order.run('q2', () => { otherReady = true })
   await turn()
   assert.equal(otherReady, true, 'an edit of q1 never holds q2')
 
-  const afterEdit = order.settled('q1')
   save.reject(new Error('offline'))
   await assert.rejects(edit, /offline/, 'the edit reports its own failure')
-  await afterEdit
   await turn()
   let ready = false
-  order.settled('q1').then(() => { ready = true })
+  void order.run('q1', () => { ready = true })
   await turn()
   assert.equal(ready, true, 'nothing is left waiting once the failed edit settles')
 })

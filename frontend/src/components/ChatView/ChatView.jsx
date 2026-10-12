@@ -3281,7 +3281,9 @@ export default function ChatView({
       : pendingFiles
           .filter(f => f.status === 'done')
           .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
-    if (pendingFiles.some(c => c.status === 'uploading')) return false
+    // Only a send that takes the draft's files waits for their uploads; a
+    // history resend (attachments supplied, `[]`) goes without them.
+    if (usesComposerFiles && pendingFiles.some(c => c.status === 'uploading')) return false
     if (!hasSendablePayload(text, attachments)) return false
 
     const pin = opts.pin !== false  // default true
@@ -4368,8 +4370,11 @@ export default function ChatView({
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
   // CID: full queue snapshots can arrive out of order when two rows are
   // cancelled quickly and would otherwise resurrect a sibling cancellation.
-  const handleCancelPending = useCallback(async (cid) => {
-    await queuedEditOrder.settled(cid)
+  // One chain per message (queuedEditOrder): the cancellation waits out
+  // in-flight edits, whose late responses could otherwise put the row back,
+  // and an edit opened during a slow cancellation waits for its outcome
+  // instead of racing the DELETE.
+  const handleCancelPending = useCallback((cid) => queuedEditOrder.run(cid, async () => {
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
@@ -4456,7 +4461,7 @@ export default function ChatView({
         setSendFailure('Cancellation couldn’t be confirmed. This message may still be queued in Möbius; reconnect to check.')
       }
     }
-  }, [chatId, pendingQueue, queuedEditOrder, setSendFailure])
+  }), [chatId, pendingQueue, queuedEditOrder, setSendFailure])
 
   const handleRetryRejected = useCallback(async cid => {
     const result = await retryRejectedIntent(cid, { chatId, principalKey: outboxPrincipalKey(getToken()) })
@@ -4998,16 +5003,19 @@ export default function ChatView({
     try {
       const queueWrite = queuedSendRequestsRef.current.get(cid)
       if (queueWrite) await Promise.allSettled([queueWrite])
-      // Send the row's saved edit, not the text that edit is replacing.
-      await queuedEditOrder.settled(cid)
-      const findRow = () => pendingQueue.getSteerCandidates().find(m => cidOf(m) === cid)
-      let row = findRow()
-      if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
-        await reconcileRuntimeState()
-        row = findRow()
-      }
-      if (!row || !(typeof row.ts === 'number' && row.serverTs === true)) return
-      await steerRows([row])
+      // Send the row's saved edit, not the text that edit is replacing: run on
+      // the row's chain, so earlier edits settle first and an edit opened
+      // during a slow send waits for this steer instead of racing it.
+      await queuedEditOrder.run(cid, async () => {
+        const findRow = () => pendingQueue.getSteerCandidates().find(m => cidOf(m) === cid)
+        let row = findRow()
+        if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
+          await reconcileRuntimeState()
+          row = findRow()
+        }
+        if (!row || !(typeof row.ts === 'number' && row.serverTs === true)) return
+        await steerRows([row])
+      })
     } finally {
       handlingSteerRef.current = false
       setSteerBusy(false)

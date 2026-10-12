@@ -126,10 +126,12 @@ test('ChatView routes queued edits, cancels, and Send now through one per-messag
   )
   assert.match(
     source,
-    /const handleCancelPending = useCallback\(async \(cid\) => \{\s*await queuedEditOrder\.settled\(cid\)/,
+    /const handleCancelPending = useCallback\(\(cid\) => queuedEditOrder\.run\(cid, async \(\) => \{/,
+    'the cancellation itself runs on the per-message chain',
   )
   assert.match(
     source,
-    /async function handleSteerOne\(cid\) \{[\s\S]*?await queuedEditOrder\.settled\(cid\)[\s\S]*?const findRow/,
+    /async function handleSteerOne\(cid\) \{[\s\S]*?await queuedEditOrder\.run\(cid, async \(\) => \{[\s\S]*?const findRow/,
+    'Send now runs on the per-message chain too',
   )
 })
