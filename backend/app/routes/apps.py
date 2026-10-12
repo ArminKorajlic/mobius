@@ -31,7 +31,7 @@ from app import (
   source_dirs, workspace_files,
 )
 from app.manifest_identity import (
-  requested_manifest_source, same_permanent_package, stored_manifest_fetch_url,
+  requested_manifest_source, stored_manifest_fetch_url,
 )
 from app.app_identity import (
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
@@ -865,7 +865,6 @@ async def install_app(
           code="git_install_unavailable",
           failure="The app's Git repository could not be cloned or verified; "
           "retry when its source is available.",
-          retryable=True,
         ) from exc
     # Serialize the whole install against any concurrent uninstall — both are
     # app-lifecycle operations over the same /data/apps trees, and letting them
@@ -1403,12 +1402,12 @@ def _update_candidate_matches_installed(
   """Accept the installed package identity or its reviewed predecessor.
 
   A permanent `package_id` binds the package across manifest id renames, as
-  it does for install.
+  it does for install, so a row that has one matches only that package.
   """
   from app import install
 
-  if same_permanent_package(candidate_manifest, installed_package_id):
-    return True
+  if installed_package_id:
+    return candidate_manifest.get("package_id") == installed_package_id
 
   predecessor_source, _ = install._reviewed_predecessor_source(
     candidate_manifest, candidate_manifest_url,
