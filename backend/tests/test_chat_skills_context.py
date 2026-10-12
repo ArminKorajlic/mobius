@@ -531,27 +531,33 @@ def test_visual_testing_explains_full_chrome_is_unavailable_on_small_servers():
   assert "**headless shell**" in visual
   assert "cat /sys/fs/cgroup/memory.max" in visual
   assert "**Below 2 GiB\n(2147483648), do not start it:**" in visual
-  assert 'AGENT_BROWSER_EXECUTABLE_PATH="$FULL_CHROME"' in visual
+  assert 'AGENT_BROWSER_EXECUTABLE_PATH="${FULL_CHROME:?}"' in visual
+  assert "This recipe is for amd64 only" in visual
 
 
 def test_full_chrome_recipe_gives_each_session_its_own_profile_and_removes_it():
   # Chrome locks its profile directory, and session reset selects browsers by
-  # profile: a profile shared between sessions makes the second launch fail or
-  # attach, and lets one session's reset end another session's browser.
+  # profile. Several named sessions in one chat share its TMPDIR, so a fixed
+  # profile name there makes a second launch fail or attach, and lets one
+  # session's reset end another session's browser.
   repo = Path(__file__).resolve().parents[2]
   visual = (
     repo / "backend" / "scripts" / "seed-skills" / "visual-testing.md"
   ).read_text(encoding="utf-8")
 
-  assert 'FULL_SESSION="$AGENT_BROWSER_SESSION-full"' in visual
-  assert 'FULL_PROFILE="$TMPDIR/agent-browser-$FULL_SESSION"' in visual
+  # Missing values stop the command instead of collapsing every caller onto
+  # one shared profile, or deleting a path built from an empty value.
+  assert 'FULL_SESSION="${AGENT_BROWSER_SESSION:?}-full"' in visual
+  assert 'FULL_PROFILE="${TMPDIR:?}/agent-browser-$FULL_SESSION"' in visual
   assert 'AGENT_BROWSER_SESSION="$FULL_SESSION"' in visual
   assert 'AGENT_BROWSER_PROFILE="$FULL_PROFILE"' in visual
   assert "full-chrome-profile" not in visual
-  # The profile is deleted only after reset confirms no browser still owns it.
+  # Cleanup runs as its own command, so it must repeat the definitions; run
+  # without them it stops on the guard. The profile is deleted only after the
+  # reset confirms no browser still owns it.
+  assert "including the cleanup, with these definitions" in visual
   assert (
-    'agent_browser_session_reset.py" "$FULL_PROFILE" \\\n'
-    '  && rm -rf "$FULL_PROFILE"'
+    'agent_browser_session_reset.py" "${FULL_PROFILE:?}" && rm -rf "$FULL_PROFILE"'
   ) in visual
 
 

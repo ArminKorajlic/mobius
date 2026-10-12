@@ -148,34 +148,37 @@ and that raising the server's memory to 2 GB would make it possible. Keep
 using the default browser for everything else. If the owner still asks you
 to try, warn once, then proceed.
 
-Use full Chrome in its own session with a throwaway profile named after that
-session, so the default session keeps its identity and no other session
-shares the profile. Shell state does not carry between commands: repeat the
-definitions (everything above `full open`) in every command that uses full
-Chrome. They always resolve to the same session and profile.
+This recipe is for amd64 only: arm64 images have no separate full Chrome,
+and their default Chromium already is the full browser. Use full Chrome
+in its own session with a throwaway profile named after that session, so the
+default session keeps its identity and no other session shares the profile.
+Shell state does not carry between commands, so start every command that uses
+full Chrome, including the cleanup, with these definitions. They always
+resolve to the same session and profile, and stop with an error if a value is
+missing:
 
 ```bash
 FULL_CHROME="$(ls -d /opt/agent-browser/browsers/chrome-*/chrome | head -n 1)"
-FULL_SESSION="$AGENT_BROWSER_SESSION-full"
-FULL_PROFILE="$TMPDIR/agent-browser-$FULL_SESSION"
+FULL_SESSION="${AGENT_BROWSER_SESSION:?}-full"
+FULL_PROFILE="${TMPDIR:?}/agent-browser-$FULL_SESSION"
 full() {
   AGENT_BROWSER_SESSION="$FULL_SESSION" \
   AGENT_BROWSER_PROFILE="$FULL_PROFILE" \
-  AGENT_BROWSER_EXECUTABLE_PATH="$FULL_CHROME" agent-browser "$@"
+  AGENT_BROWSER_EXECUTABLE_PATH="${FULL_CHROME:?}" agent-browser "$@"
 }
-full open <url>
 ```
 
-When done, close it, confirm nothing still uses the profile, then delete the
-profile. If `full close` hangs, stop it and run only the second line:
+Then use it, for example `full open <url>`. When done, close it, confirm
+nothing still uses the profile, then delete the profile (after the same
+definitions):
 
 ```bash
 full close
-python3 "$SCRIPTS_DIR/agent_browser_session_reset.py" "$FULL_PROFILE" \
-  && rm -rf "$FULL_PROFILE"
+python3 "$SCRIPTS_DIR/agent_browser_session_reset.py" "${FULL_PROFILE:?}" && rm -rf "$FULL_PROFILE"
 ```
 
-If the reset fails, leave the profile in place and name it for the next agent.
+If `full close` hangs, stop it and run only the reset line. If the reset
+fails, leave the profile in place and name its path for the next agent.
 
 ## Close the browser session when you are done
 
