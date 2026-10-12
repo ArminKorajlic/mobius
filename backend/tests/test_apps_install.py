@@ -1721,6 +1721,67 @@ def test_install_rolls_back_on_compile_failure(client, auth, bypass_url_validati
   assert "rollback-target" not in slugs
 
 
+def test_install_reports_a_stalled_build_as_structured_environment_503(
+  client, auth, bypass_url_validation,
+):
+  """A stalled build is not a compile failure: same refusal shape as apply."""
+  from app.app_compile_contract import RolldownStalled
+
+  base = "https://x.test/stalled/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "id": "stalled-target",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+
+  async def stalled(*_args, **_kwargs):
+    raise RolldownStalled()
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.install.compile_jsx", side_effect=stalled):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert r.status_code == 503, r.text
+  assert r.json()["detail"] == RolldownStalled().detail()
+  assert r.json()["detail"]["code"] == "build_stalled"
+  slugs = [a["slug"] for a in client.get("/api/apps/", headers=auth).json()]
+  assert "stalled-target" not in slugs
+
+
+@pytest.mark.asyncio
+async def test_ancillary_resolution_does_not_swallow_a_stalled_build():
+  """A stall proves nothing about bundle equality, so it must surface."""
+  from app.app_compile_contract import RolldownStalled
+
+  manifest = {
+    "id": "stall-check", "name": "Stall", "version": "1.0.0",
+    "entry": "index.jsx", "description": "Stall check",
+  }
+
+  async def stalled(*_args, **_kwargs):
+    raise RolldownStalled()
+
+  from fastapi import HTTPException
+
+  with patch("app.install.compile_jsx", side_effect=stalled), \
+      pytest.raises(HTTPException) as exc:
+    await install._kept_local_bundle_unchanged(
+      {"index.jsx": b"export default function App() { return null }"},
+      manifest, {}, {}, ["README.md"],
+    )
+
+  assert exc.value.status_code == 503
+  assert exc.value.detail["code"] == "build_stalled"
+
+
 def test_install_inline_manifest_requires_raw_base(client, auth):
   """Inline `manifest` without `raw_base` → 400 (we don't know where
   to fetch entry JSX from)."""
@@ -3326,6 +3387,20 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
   assert update.status_code == 200, update.text
   assert update.json()["update_available"] is True
   assert update.json()["pending_update_state"] == "needs_resolution"
+
+  # The pre-install review reports the same pending state, so the Store can
+  # block the install instead of re-entering the resolver.
+  def preview_state():
+    with _git_update_source(
+      _git_candidate({**m, "version": "2.0.0"}, jsx_v2),
+    ):
+      preview = client.get(
+        f"/api/apps/{payload['id']}/update-candidate-preview", headers=auth,
+      )
+    assert preview.status_code == 200, preview.text
+    return preview.json()["pending_update_state"]
+
+  assert preview_state() == "needs_resolution"
   assert update.json()["needs_resolution"] is True
   assert update.json()["upstream_version"] == "2.0.0"
   bypass = client.patch(
@@ -3368,6 +3443,7 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
     f"/api/apps/{payload['id']}/update-check", headers=auth,
   )
   assert resolved_update.json()["pending_update_state"] == "replay_pending"
+  assert preview_state() == "replay_pending"
   redundant_resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
   )
@@ -5234,6 +5310,7 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   assert "a/index.jsx" in payload["upstream_diff"]
   assert "b/index.jsx" in payload["upstream_diff"]
   assert len(payload["source_digest"]) == 64
+  assert payload["pending_update_state"] == "none"
   assert jsx_file.read_text() == before
 
   changed_after_review = jsx_v2.replace("INCOMING FOOTER", "MOVED AGAIN")
