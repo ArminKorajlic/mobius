@@ -2525,6 +2525,7 @@
 }
 
 .chat__history-strip-back {
+  position: relative;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -2537,6 +2538,15 @@
   background: none;
   color: var(--muted);
   cursor: pointer;
+}
+
+/* The well stays 26px, but the tap target is 44px. The strip's 5px padding
+   plus the 6px gaps above and below it leave room, so the extra area covers
+   no other control (the draft chip beside it is not interactive). */
+.chat__history-strip-back::after {
+  content: '';
+  position: absolute;
+  inset: -9px;
 }
 
 .chat__history-strip-back:hover {

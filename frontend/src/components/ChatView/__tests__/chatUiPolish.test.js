@@ -336,3 +336,12 @@ test('queued message content participates in native text selection', () => {
     'the queued message surface must not cancel selection at pointer-down',
   )
 })
+
+test('the history strip\'s back control keeps a 26px well with a 44px tap target', () => {
+  const button = chatCss.match(/\.chat__history-strip-back \{[\s\S]*?\}/)?.[0] || ''
+  assert.match(button, /position: relative;/)
+  assert.match(button, /width: 26px;[\s\S]*?height: 26px;/)
+  const hitArea = chatCss.match(/\.chat__history-strip-back::after \{[\s\S]*?\}/)?.[0] || ''
+  assert.match(hitArea, /position: absolute;/)
+  assert.match(hitArea, /inset: -9px;/, '26px + 2 × 9px = 44px')
+})

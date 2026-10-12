@@ -3249,6 +3249,11 @@ export default function ChatView({
   // early tap waits on these exact requests rather than becoming an inert
   // click or briefly showing Stop.
   const queuedSendRequestsRef = useRef(new Map())
+  // A queued row's edit while its save is in flight, by cid. Cancelling or
+  // sending that row now waits for it, so the writes reach the outbox and the
+  // server in order: a late edit response hydrates server truth and would
+  // otherwise put a just-cancelled row back in the tray.
+  const queuedEditRequestsRef = useRef(new Map())
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return false
@@ -4359,6 +4364,8 @@ export default function ChatView({
   // CID: full queue snapshots can arrive out of order when two rows are
   // cancelled quickly and would otherwise resurrect a sibling cancellation.
   const handleCancelPending = useCallback(async (cid) => {
+    const editWrite = queuedEditRequestsRef.current.get(cid)
+    if (editWrite) await Promise.allSettled([editWrite])
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
@@ -4452,7 +4459,7 @@ export default function ChatView({
     if (result.status !== 'queued') setSendFailure('Couldn’t retry yet. Your message is still kept on this device.')
   }, [chatId, setSendFailure])
 
-  const handleUpdatePending = useCallback(async (cid, content) => {
+  const updateQueuedContent = useCallback(async (cid, content) => {
     const local = await editLocalIntent(cid, {
       chatId, principalKey: outboxPrincipalKey(getToken()), content,
     })
@@ -4492,6 +4499,16 @@ export default function ChatView({
       return 'error'
     }
   }, [chatId, pendingQueue])
+
+  const handleUpdatePending = useCallback(async (cid, content) => {
+    const edit = updateQueuedContent(cid, content)
+    queuedEditRequestsRef.current.set(cid, edit)
+    try {
+      return await edit
+    } finally {
+      if (queuedEditRequestsRef.current.get(cid) === edit) queuedEditRequestsRef.current.delete(cid)
+    }
+  }, [updateQueuedContent])
 
   async function handleStop() {
     // Re-entry guard. Without this, two rapid Stop clicks would both
@@ -4983,6 +5000,9 @@ export default function ChatView({
     try {
       const queueWrite = queuedSendRequestsRef.current.get(cid)
       if (queueWrite) await Promise.allSettled([queueWrite])
+      // Send the row's saved edit, not the text that edit is replacing.
+      const editWrite = queuedEditRequestsRef.current.get(cid)
+      if (editWrite) await Promise.allSettled([editWrite])
       const findRow = () => pendingQueue.getSteerCandidates().find(m => cidOf(m) === cid)
       let row = findRow()
       if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
