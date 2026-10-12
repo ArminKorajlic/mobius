@@ -39,7 +39,6 @@ from app.chat_visibility import (
 )
 from app.chat_event_sink import active_sink_assistant_message_id
 from app.chat_activity import chat_activity_page
-from app.chat_context import recent_chat_summary_order
 from app.chat_waits import (
   outstanding_wait_chat_ids,
   outstanding_waits_for_chat,
@@ -2269,55 +2268,27 @@ def get_chat_agent_context(
   instance. All the underlying builders are pure/read-only.
   """
   from app import memory
-  from app.chat import (
-    _build_app_context,
-    _build_app_report_block,
-    _chat_settings_dict,
-    _custom_system_prompt,
-    _latest_compaction_brief,
-    _read_skill_text,
-  )
+  from app.agent_context import assemble_agent_context
   from app.compaction import load_full_digest
-  from app.providers import get_skill_origin
-  from app.system_prompts import prompt_for_chat
 
   chat = get_active_chat_or_404(db, chat_id)
   data_dir = get_settings().data_dir
-  overrides = _chat_settings_dict(chat)
-  custom = _custom_system_prompt(overrides)
-  system_prompt = prompt_for_chat(
-    chat,
-    custom if custom else _read_skill_text(),
-    db,
-    persist=False,
-  )
-  app_context_block, _env = _build_app_context(db, chat_id, data_dir)
-  app_report_block = _build_app_report_block(db, chat_id, data_dir)
-  compaction_brief = _latest_compaction_brief(chat)
+  parts = assemble_agent_context(db, chat, data_dir)
   chat_digest = load_full_digest(data_dir, chat_id)
   chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
-  ordered_chat_ids = recent_chat_summary_order(db)
-  recent_chat_block = memory.build_memory_block(
-    data_dir,
-    ordered_chat_ids=ordered_chat_ids,
-  )
-  recent_chats = recent_chat_block.text or None
   return {
-    "system_prompt": system_prompt,
-    "system_prompt_source": (
-      "snapshot" if chat.system_prompt_snapshot_id
-      else ("custom_preview" if custom else "skill_preview")
-    ),
-    "system_prompt_origin": "custom" if custom else get_skill_origin(),
+    "system_prompt": parts.system_prompt,
+    "system_prompt_source": parts.system_prompt_source,
+    "system_prompt_origin": parts.system_prompt_origin,
     # `memory_block` remains as a compatibility alias for an older shell. The
     # owner-facing name is now precise: this is only bounded recent-chat
     # continuity, never knowledge-graph memory.
-    "recent_chats": recent_chats,
-    "recent_chat_entries": recent_chat_block.entries,
-    "memory_block": recent_chats,
-    "app_context": app_context_block,
-    "app_report": app_report_block,
-    "compaction_brief": compaction_brief,
+    "recent_chats": parts.recent_chats,
+    "recent_chat_entries": parts.recent_chat_entries,
+    "memory_block": parts.recent_chats,
+    "app_context": parts.app_context,
+    "app_report": parts.app_report,
+    "compaction_brief": parts.compaction_brief,
     # The title fallback keeps the first layer useful before the first settled
     # turn publishes its note. Once published, expose the one-line summary
     # itself so the owner can inspect all three summary layers together.
@@ -2325,6 +2296,27 @@ def get_chat_agent_context(
     "chat_summary": chat_summary_metadata["summary"],
     "chat_digest": chat_digest,
   }
+
+
+@router.get("/{chat_id}/context-sizes")
+def get_chat_context_sizes(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Estimated tokens of each part Möbius adds to this chat's context.
+
+  Backs the composer's ``/context`` panel. It reads the same parts as
+  ``agent-context`` but returns only their sizes, so opening the panel never
+  downloads the prompt texts. No model is called. The panel takes the total
+  and the window from the chat's usage reading and shows the remainder as the
+  conversation plus the provider's own instructions and tools.
+  """
+  from app.agent_context import assemble_agent_context, context_part_sizes
+
+  chat = get_active_chat_or_404(db, chat_id)
+  parts = assemble_agent_context(db, chat, get_settings().data_dir)
+  return {"parts": context_part_sizes(parts)}
 
 
 @router.get("/{chat_id}/usage")
@@ -3071,6 +3063,87 @@ async def stop_manual_compaction(
     if not await handle.stop():
       raise HTTPException(503, "Preparation is still stopping; no new batch was started.")
   return {"ok": True}
+
+
+class SideQuestionAsk(BaseModel):
+  question: str = Field(min_length=1, max_length=4000)
+
+
+class SideQuestionKeep(BaseModel):
+  # Client-minted identity: a retried add returns the row it already stored.
+  cid: str = Field(min_length=1, max_length=128)
+  question: str = Field(min_length=1, max_length=4000)
+  answer: str = Field(min_length=1, max_length=20000)
+  provider: Literal["claude", "codex"]
+
+
+@router.post("/{chat_id}/btw", dependencies=[Depends(reject_cross_site)])
+async def ask_chat_side_question(
+  chat_id: str,
+  body: SideQuestionAsk,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  db: Session = Depends(get_db),
+):
+  """Answer a ``/btw`` question from a temporary copy of this chat.
+
+  The copy forks the chat's provider session with no tools and is never
+  saved, so asking neither interrupts a running turn nor joins the queue, and
+  nothing reaches the transcript unless the owner adds the answer through
+  ``POST /side-questions``. One question runs per chat at a time.
+  """
+  from app.side_questions import (
+    SideQuestionError, answer_side_question, plan_side_question,
+  )
+
+  chat = get_active_chat_or_404(db, chat_id)
+  try:
+    plan = plan_side_question(db, chat, body.question)
+  except SideQuestionError as exc:
+    raise HTTPException(exc.status_code, exc.message) from exc
+  # The fork can take minutes; it must not hold a database connection.
+  db.close()
+  try:
+    answer = await answer_side_question(plan, get_settings().data_dir)
+  except SideQuestionError as exc:
+    raise HTTPException(exc.status_code, exc.message) from exc
+  return {
+    "question": answer.question,
+    "answer": answer.answer,
+    "provider": answer.provider,
+  }
+
+
+@router.post("/{chat_id}/side-questions", dependencies=[Depends(reject_cross_site)])
+async def keep_chat_side_question(
+  chat_id: str,
+  body: SideQuestionKeep,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  db: Session = Depends(get_db),
+):
+  """Add a side question's answer to the transcript ("Add to chat").
+
+  It never starts a turn; the agent receives it at the start of its next
+  successful one. Refused while a question card waits for the owner.
+  """
+  from app.chat_writer import AppendSideQuestion, await_ack, get_writer
+
+  get_active_chat_or_404(db, chat_id)
+  db.close()
+  try:
+    result = await await_ack(get_writer().submit(AppendSideQuestion(
+      chat_id=chat_id,
+      cid=body.cid,
+      question=body.question.strip(),
+      answer=body.answer.strip(),
+      provider=body.provider,
+    )))
+  except Exception:
+    raise HTTPException(503, "Could not add the side question; try again.")
+  if result.get("status") == "conflict":
+    raise HTTPException(
+      409, "Answer the open question first, then add the side question.",
+    )
+  return {"stored": result.get("stored")}
 
 
 # An app that opens a chat ABOUT one of its dated reports passes the report's

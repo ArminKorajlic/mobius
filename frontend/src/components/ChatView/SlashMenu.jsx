@@ -18,6 +18,14 @@ import './SlashMenu.css'
  * aria-activedescendant, so a screen reader announces the highlighted command
  * without the focus ever leaving the input.
  */
+/** "also /clear" on a command's own row; "same as /new" when typed by alias. */
+export function aliasNote(command) {
+  if (command.invokedAs) return `same as /${command.name}`
+  return command.aliases?.length
+    ? `also ${command.aliases.map((alias) => `/${alias}`).join(', ')}`
+    : ''
+}
+
 export default function SlashMenu({
   commands,
   activeIndex,
@@ -57,7 +65,10 @@ export default function SlashMenu({
               onClick={() => { if (available) onSelect(command) }}
             >
               <div className="slash-menu__line">
-                <span className="slash-menu__name">/{command.name}</span>
+                <span className="slash-menu__name">/{command.invokedAs || command.name}</span>
+                {aliasNote(command) && (
+                  <span className="slash-menu__alias">{aliasNote(command)}</span>
+                )}
                 <span className="slash-menu__args">{command.args}</span>
               </div>
               <div className="slash-menu__summary">{command.summary}</div>

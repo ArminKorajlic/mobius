@@ -41,6 +41,18 @@ test('history contains only visible owner-authored text', () => {
   ]), ['first', 'review this', 'second'])
 })
 
+test('an added side question is context, so ↑ never offers it to resend', () => {
+  assert.deepEqual(composerHistoryFromMessages([
+    { role: 'user', content: 'first' },
+    {
+      role: 'user',
+      kind: 'side_question',
+      content: 'Side question: what do the tests cover?\n\nAnswer (from a temporary copy of this chat): Saving and moving cards.',
+      side_question: { question: 'what do the tests cover?', answer: 'Saving and moving cards.' },
+    },
+  ]), ['first'])
+})
+
 test('Up walks older sent messages and Down returns toward newer ones', () => {
   const history = ['first', 'second', 'third']
   let state = resolveComposerHistoryMove(key('ArrowUp'), {

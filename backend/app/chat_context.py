@@ -608,13 +608,19 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
 # The slash commands Möbius owns; none is forwarded to a provider CLI. `/goal`
 # creates the Möbius Goal, and the agent receives its objective as a plain
 # request (goal_commands.goal_request_for_agent), so Claude's own `/goal` never
-# runs. `/compact` rewrites the chat's live context and resets the provider
-# session (routes/chats.py ``/compact``); it never reaches a model as prose.
+# runs. The rest are chat actions the composer runs instead of sending, so none
+# reaches a model as prose: `/compact` rewrites the chat's live context and
+# resets the provider session (routes/chats.py ``/compact``); `/new` and its
+# alias `/clear` open a new chat in the same project with the same model;
+# `/context` reads ``/context-sizes``; `/btw` asks ``/btw`` for an answer from a
+# temporary copy of the chat.
 # This is half of a cross-language contract: the composer's "/" menu
 # (frontend/src/components/ChatView/slashCommands.js) offers exactly this set,
-# and `test_slash_command_registry_parity` pins the two together so a menu entry
-# can never silently degrade into prose.
-MOBIUS_SLASH_COMMANDS = frozenset({"/goal", "/compact"})
+# aliases included, and `test_slash_command_registry_parity` pins the two
+# together so a menu entry can never silently degrade into prose.
+MOBIUS_SLASH_COMMANDS = frozenset({
+  "/goal", "/compact", "/new", "/clear", "/context", "/btw",
+})
 
 
 def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:

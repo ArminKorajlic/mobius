@@ -85,6 +85,9 @@ import useCompactCommands from './hooks/useCompactCommands.js'
 import { mobiusChatCommand } from './slashCommands.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
+import ContextPanel from './ContextPanel.jsx'
+import SideQuestionCard from './SideQuestionCard.jsx'
+import useSideQuestion from './hooks/useSideQuestion.js'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ChatDiffViewer from './ChatDiffViewer.jsx'
 import ChatUsageInspector from './ChatUsageInspector.jsx'
@@ -217,6 +220,7 @@ import {
   coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
+  isSideQuestionMessage,
   isOwnerUserMessage,
   combineOwnerMessagesForDisplay,
   ownerMessageBatch,
@@ -254,6 +258,7 @@ import {
 } from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
+  composerDraftRevision,
   consumeComposerHandoff,
 } from './composerDraft.js'
 import {
@@ -261,7 +266,11 @@ import {
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
-import { needsModelSelection, selectedChatModel } from './modelSelectionPolicy.js'
+import {
+  needsModelSelection,
+  resolvedChatSettings,
+  selectedChatModel,
+} from './modelSelectionPolicy.js'
 import { collectChatDiffs } from './chatDiffs.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
@@ -390,6 +399,9 @@ export default function ChatView({
   newChatSession = null,
   onNewChatSubmit,
   onNewChatRetry,
+  // `/new` and `/clear`: Shell starts the chat (startChatFromCommand) and
+  // resolves true once it exists.
+  onNewChatCommand = null,
   onStreamEnd,
   onRuntimeSettledIdle = null,
   onFirstMessage,
@@ -752,6 +764,7 @@ export default function ChatView({
   // hasPendingQuestion / hasPendingResume, alongside the callback refs the
   // cards themselves use to publish the node being observed.
   const [showInspector, setShowInspector] = useState(false)
+  const [showContextPanel, setShowContextPanel] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
   const [showChanges, setShowChanges] = useState(false)
   const [showUsage, setShowUsage] = useState(false)
@@ -4227,11 +4240,87 @@ export default function ChatView({
     stopTurn: handleStop,
   })
 
+  const sideQuestions = useSideQuestion({
+    chatId,
+    // The added row is the server's; read it back like any transcript write.
+    onAdded: () => fetchMessages({ force: true }),
+  })
+
+  // Chat commands (slashCommands.mobiusChatCommand) run here and are never
+  // sent. Nothing typed is lost to a failure: /compact and /new leave the chat
+  // box only once their action has happened, and /btw moves its question into
+  // the side-question card, which offers Try again.
   function dispatchMobiusChatCommand(composed) {
     const command = mobiusChatCommand(composed)
     if (!command) return false
-    void runCompactCommand(command.instructions, composed)
+    if (command.action === 'compact') {
+      void runCompactCommand(command.argument, composed)
+    } else if (command.action === 'new') {
+      void startNewChatFromCommand(command.argument, composed)
+    } else if (command.action === 'context') {
+      setComposerInput('')
+      setShowContextPanel(true)
+    } else if (command.action === 'btw') {
+      askSideQuestionFromCommand(command.argument)
+    }
     return true
+  }
+
+  // `/new` keeps this chat untouched: Shell opens a new one in its project,
+  // on its provider and model, and sends any text after the command there.
+  // The command stays in the box until the chat exists, so a second Enter
+  // meanwhile must not start a second chat.
+  const newChatCommandInFlightRef = useRef(false)
+  async function startNewChatFromCommand(firstMessage, submittedInput) {
+    if (!onNewChatCommand) {
+      setSendFailure('Open this chat in Möbius to start a new chat from it.')
+      return
+    }
+    if (newChatCommandInFlightRef.current) return
+    newChatCommandInFlightRef.current = true
+    setSendFailure(null)
+    const sourceChatId = chatId
+    const revision = composerDraftRevision(sourceChatId)
+    const settings = resolvedChatSettings(chatInfo)
+    const started = await onNewChatCommand({
+      projectId: chatInfo?.project?.id ?? null,
+      settings: chatInfo?.provider && settings.model
+        ? {
+          provider: chatInfo.provider,
+          agentSettings: {
+            model: settings.model,
+            ...(settings.effort ? { effort: settings.effort } : {}),
+            ...(settings.effort_by_provider
+              ? { effort_by_provider: settings.effort_by_provider }
+              : {}),
+          },
+        }
+        : null,
+      firstMessage,
+    }).finally(() => { newChatCommandInFlightRef.current = false })
+    // Typing since the submit is newer than the command and stays.
+    if (started && composerDraftRevision(sourceChatId) === revision
+        && inputValueRef.current.trim() === submittedInput) {
+      setComposerInput('')
+    }
+  }
+
+  function askSideQuestionFromCommand(question) {
+    if (!question) {
+      setSendFailure('Type a question after /btw.')
+      return
+    }
+    if (provisionalNewChat) {
+      setSendFailure('This chat has nothing to answer from yet. Ask again after its first reply.')
+      return
+    }
+    if (sideQuestions.sideQuestion?.status === 'asking') {
+      setSendFailure('A side question is already being answered. Close it to ask another.')
+      return
+    }
+    setSendFailure(null)
+    setComposerInput('')
+    void sideQuestions.ask(question)
   }
 
   function handleSubmit(e) {
@@ -6134,6 +6223,21 @@ export default function ChatView({
           onClose={() => setShowInspector(false)}
         />
       )}
+      {showContextPanel && (
+        <ContextPanel
+          chatId={chatId}
+          started={!provisionalNewChat}
+          provider={chatInfo?.provider}
+          providerSessionId={chatInfo?.session_id}
+          model={selectedChatModel(chatInfo)}
+          liveContext={liveContext}
+          onClose={() => setShowContextPanel(false)}
+          onCompact={() => {
+            setShowContextPanel(false)
+            void runCompactCommand('', null)
+          }}
+        />
+      )}
       {!embedded && showSummary && (
         <ChatSummaryViewer
           chatId={chatId}
@@ -6266,7 +6370,10 @@ export default function ChatView({
                   peerTimeline.messages.slice(ownerBatch.start, ownerBatch.end + 1),
                 )
               : projectedMsg
-            const continuationMarker = isContinuationMessage(msg)
+            // Product rows that keep role=user (continuations, added side
+            // questions) take the full-width marker lane, not a bubble.
+            const markerRow = isContinuationMessage(msg)
+              || isSideQuestionMessage(msg)
             const renderedEndIndex = ownerBatch?.end ?? i
             // Assistant replies have already been handled above. Owner and
             // product rows retain their existing scroll and metadata identity.
@@ -6281,7 +6388,7 @@ export default function ChatView({
             return [peerRows, (
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
-              className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
+              className={`chat__msg chat__msg--${markerRow ? 'marker' : msg.role}`}
               tabIndex={-1}
               ref={renderedEndIndex === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
@@ -6492,6 +6599,13 @@ export default function ChatView({
           onContinue={continueCompaction}
           onStartOver={() => runCompactCommand('', null)}
           onStop={stopCompactCommand}
+        />
+        <SideQuestionCard
+          sideQuestion={sideQuestions.sideQuestion}
+          provider={chatInfo?.provider}
+          onAdd={sideQuestions.add}
+          onClose={sideQuestions.close}
+          onRetry={sideQuestions.retry}
         />
         <ChatInputBar
           chatId={chatId}

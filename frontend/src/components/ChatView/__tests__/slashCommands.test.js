@@ -130,25 +130,93 @@ test('/compact is offered and recognised as a platform-handled command', () => {
   assert.ok(slashCommandIsAvailable(offered[0], 'codex'))
 
   assert.deepEqual(mobiusChatCommand('/compact'), {
-    name: '/compact', instructions: '',
+    name: '/compact', action: 'compact', argument: '',
   })
   assert.deepEqual(mobiusChatCommand('  /compact  '), {
-    name: '/compact', instructions: '',
+    name: '/compact', action: 'compact', argument: '',
   })
   assert.deepEqual(mobiusChatCommand('/compact focus on the UI decisions'), {
-    name: '/compact', instructions: 'focus on the UI decisions',
+    name: '/compact', action: 'compact', argument: 'focus on the UI decisions',
   })
   assert.equal(mobiusChatCommand('/compacted'), null)
   assert.equal(mobiusChatCommand('please /compact'), null)
   assert.equal(mobiusChatCommand(''), null)
-  assert.deepEqual(MOBIUS_CHAT_COMMANDS, ['/compact'])
 })
 
 test('accepting /compact composes the exact command the dispatcher matches', () => {
   const [compact] = matchSlashCommands('/compact')
   assert.deepEqual(mobiusChatCommand(applySlashCommand(compact)), {
-    name: '/compact', instructions: '',
+    name: '/compact', action: 'compact', argument: '',
   })
+})
+
+test('every chat action is in the menu, and only /goal is sent as a message', () => {
+  const offered = new Set(SLASH_COMMANDS.flatMap(command => [
+    `/${command.name}`,
+    ...(command.aliases || []).map(alias => `/${alias}`),
+  ]))
+  for (const name of MOBIUS_CHAT_COMMANDS) assert.ok(offered.has(name), name)
+  assert.deepEqual(
+    [...offered].filter(name => !MOBIUS_CHAT_COMMANDS.includes(name)),
+    ['/goal'],
+  )
+})
+
+test('/new and /clear open a new chat and carry the text after them as its first message', () => {
+  assert.deepEqual(mobiusChatCommand('/new'), { name: '/new', action: 'new', argument: '' })
+  assert.deepEqual(mobiusChatCommand('/clear Fix the colour dots on phones'), {
+    name: '/clear', action: 'new', argument: 'Fix the colour dots on phones',
+  })
+  // Line breaks in the first message are kept.
+  assert.equal(
+    mobiusChatCommand('/new first line\nsecond line').argument,
+    'first line\nsecond line',
+  )
+})
+
+test('words that only begin like a chat command are sent as ordinary messages', () => {
+  for (const text of ['/newer idea', '/clearly not', '/contextual', '/btwx', '/data/apps/x']) {
+    assert.equal(mobiusChatCommand(text), null, text)
+  }
+})
+
+test('/context and /btw are chat actions; /btw carries its question', () => {
+  assert.deepEqual(mobiusChatCommand('/context'), {
+    name: '/context', action: 'context', argument: '',
+  })
+  assert.deepEqual(mobiusChatCommand('/btw what do the Kanban tests cover?'), {
+    name: '/btw', action: 'btw', argument: 'what do the Kanban tests cover?',
+  })
+})
+
+test('typing an alias offers its command under the alias and accepting keeps it', () => {
+  const [command] = matchSlashCommands('/cl')
+  assert.equal(command.name, 'new')
+  assert.equal(command.invokedAs, 'clear')
+  assert.equal(applySlashCommand(command), '/clear ')
+  assert.deepEqual(mobiusChatCommand(applySlashCommand(command)), {
+    name: '/clear', action: 'new', argument: '',
+  })
+})
+
+test('the bare menu lists /new once, under its own name', () => {
+  const offered = matchSlashCommands('/')
+  assert.equal(offered.filter(command => command.name === 'new').length, 1)
+  const [newCommand] = offered.filter(command => command.name === 'new')
+  assert.equal(newCommand.invokedAs, undefined)
+  assert.equal(applySlashCommand(newCommand), '/new ')
+})
+
+test('/btw is selectable only in Claude and Codex chats', () => {
+  const [btw] = matchSlashCommands('/btw')
+  assert.equal(btw.name, 'btw')
+  assert.equal(slashCommandIsAvailable(btw, 'claude'), true)
+  assert.equal(slashCommandIsAvailable(btw, 'codex'), true)
+  assert.equal(slashCommandIsAvailable(btw, 'mobius'), false)
+  assert.equal(
+    slashCommandUnavailableReason(btw, 'mobius'),
+    'Available in Claude or Codex chats.',
+  )
 })
 
 test('a failed compact restores its guidance without overwriting new typing', () => {
