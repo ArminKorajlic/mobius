@@ -22,6 +22,7 @@ import PeerMessageCard from './PeerMessageCard.jsx'
 import ToolImageResult from './ToolImageResult.jsx'
 import {
   generatedInboxImageName,
+  savedStepImageReference,
   servedImageReference,
   toolImageReference,
 } from './toolImageResult.js'
@@ -144,10 +145,16 @@ function GenericToolBlock({
   const running = t.status === 'running' || !!backgroundTask
   const iconKind = toolActivityIcon(effectiveName)
   const failed = toolBlockFailed(t)
-  // A screenshot's result is the captured picture, like a viewed image. A
-  // failed capture has no picture, only its error text, so it stays text.
+  // A screenshot is visual only when the completed step records a saved file.
+  // Interrupted or unbound captures can finish without an exit code, but their
+  // output still needs the ordinary text and copy controls.
+  const savedScreenshot = useMemo(() => (
+    effectiveName === 'ScreenControl' && t.status === 'done' && !failed
+      ? savedStepImageReference(t.saved_image, chatId)
+      : null
+  ), [effectiveName, t.status, failed, t.saved_image, chatId])
   const isImageTool = effectiveName === 'ViewImage'
-    || (effectiveName === 'ScreenControl' && !failed)
+    || !!savedScreenshot
   const hasEditPreview = typeof t.edit_preview?.diff === 'string'
   // Historical activities can contain many closed edits. Keep the durable
   // marker cheap and defer parsing until this disclosure is prepared.
@@ -163,8 +170,8 @@ function GenericToolBlock({
     completed: t.status === 'done',
   }), [t.saved_image, generatedFiles, t.viewed_image_sha256, t.status])
   const servedImage = useMemo(() => (
-    isImageTool ? servedImageReference(t.input, chatId, stepImage) : null
-  ), [isImageTool, t.input, chatId, stepImage])
+    savedScreenshot || (isImageTool ? servedImageReference(t.input, chatId, stepImage) : null)
+  ), [savedScreenshot, isImageTool, t.input, chatId, stepImage])
   // `t.sources` is NOT rendered here: the turn's sources surface once at the
   // end of the message (MessageSources), where they belong to the answer
   // rather than to the one search that found them. They deliberately do not
