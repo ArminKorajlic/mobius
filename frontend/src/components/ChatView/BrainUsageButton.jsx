@@ -25,6 +25,7 @@ export default function BrainUsageButton({
   providerSessionId = null,
   model = null,
   liveContext = null,
+  started = true,
 }) {
   const providerUsageQuery = settingsQueries.providerUsage.useQuery(provider, {
     enabled: usageEnabled && Boolean(provider),
@@ -36,6 +37,7 @@ export default function BrainUsageButton({
     providerSessionId,
     model,
     liveContext,
+    started,
   })
   const allowance = providerUsageQuery.isLoading
     ? providerAllowance(provider, null)

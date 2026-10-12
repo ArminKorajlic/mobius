@@ -40,6 +40,19 @@ function sum(parts) {
   return parts.reduce((total, part) => total + part.tokens, 0)
 }
 
+/** Whether the context is genuinely empty because the chat never ran a turn.
+ *
+ * A missing provider session id alone cannot mean "nothing is in context":
+ * compaction and provider handoffs clear the resumable session id on chats
+ * full of history (the backend documents this in side_questions.py). Only the
+ * chat's explicit lifecycle signal — a provisional chat that has not sent its
+ * first message — makes "nothing is in context yet" true. An established chat
+ * with a cleared session id reports unknown usage instead.
+ */
+export function contextNeverStarted({ started = true, providerSessionId = null } = {}) {
+  return !started && !providerSessionId
+}
+
 /**
  * Rows that add up, from the measured parts and the provider's reading.
  *

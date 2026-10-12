@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import {
   COMPACT_SUGGESTION_PERCENT,
   contextBreakdown,
+  contextNeverStarted,
   suggestsCompaction,
 } from '../contextBreakdown.js'
 
@@ -71,6 +72,19 @@ test('a total reported above the window is held to the window', () => {
   assert.equal(breakdown.used, 200000)
   assert.equal(breakdown.free, 0)
   assert.equal(breakdown.percent, 100)
+})
+
+test('a cleared session id is not mistaken for a chat that never started', () => {
+  // Compaction and provider handoffs clear the resumable session id on chats
+  // full of history. Their usage is unknown until the next turn — never
+  // "nothing is in context".
+  assert.equal(contextNeverStarted({ started: true, providerSessionId: null }), false)
+  const breakdown = contextBreakdown({ parts, tokens: null, noSession: false })
+  assert.equal(breakdown.state, 'unknown')
+  // Only a provisional chat that has not sent its first message is empty.
+  assert.equal(contextNeverStarted({ started: false, providerSessionId: null }), true)
+  // A live session always means the chat started, whatever the flag says.
+  assert.equal(contextNeverStarted({ started: false, providerSessionId: 'sess-1' }), false)
 })
 
 test('compaction is offered only once the context is nearly full', () => {

@@ -113,6 +113,7 @@ export default function ContextPanel({
     providerSessionId,
     model,
     liveContext,
+    started,
   })
   const providerLabel = PROVIDER_LABELS[provider] || 'The provider'
   const breakdown = started

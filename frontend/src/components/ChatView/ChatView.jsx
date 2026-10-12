@@ -6540,6 +6540,7 @@ export default function ChatView({
               providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
               liveContext={liveContext}
+              started={!provisionalNewChat}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover

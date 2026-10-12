@@ -269,6 +269,12 @@
   cursor: pointer;
 }
 
+/* Touch needs the 44px target on any width — tablets included, where the
+   narrow-width rule below never applies. */
+@media (pointer: coarse) {
+  .ctx__compact { min-height: 44px; }
+}
+
 .ctx__compact:focus-visible,
 .ctx__close:focus-visible,
 .ctx__retry:focus-visible {
