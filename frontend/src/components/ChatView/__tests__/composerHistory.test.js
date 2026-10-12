@@ -204,12 +204,20 @@ test('a native probe switches only when the caret was already on the edge line',
   }).probe
   assert.equal(composerHistoryProbeReachedBoundary(up, target), true, 'unchanged caret')
 
-  target.selectionStart = target.selectionEnd = 0
-  assert.equal(composerHistoryProbeReachedBoundary(up, target), true,
-    'browsers move a first-line caret to the start')
-
   target.selectionStart = target.selectionEnd = 6
   assert.equal(composerHistoryProbeReachedBoundary(up, target), false, 'moved up a visual line')
+
+  target.selectionStart = target.selectionEnd = 0
+  assert.equal(composerHistoryProbeReachedBoundary(up, target), false,
+    'from the start of a wrapped line\'s second row, ↑ also lands at 0, so it proves nothing')
+
+  target.selectionStart = target.selectionEnd = 18
+  const upOneRow = composerHistoryKeyPlan({ key: 'ArrowUp', target }, {
+    direction: 'older', value: target.value, linesWrap: false,
+  }).probe
+  target.selectionStart = target.selectionEnd = 0
+  assert.equal(composerHistoryProbeReachedBoundary(upOneRow, target), true,
+    'with no wrapped line, browsers move a top-row caret to the start: one ↑ switches')
 
   const end = target.value.length
   target.selectionStart = target.selectionEnd = 6

@@ -119,14 +119,28 @@ export function moveComposerHistory(state, entries, direction, value) {
   }
   if (direction === 'newer') {
     if (state.key == null) return null
-    const edits = rememberCurrent(state, list, value)
     const index = list.findIndex(entry => entry.key === state.key)
     if (index < 0 || index >= list.length - 1) {
-      return { state: { ...COMPOSER_DRAFT_STATE, edits }, value: state.draft }
+      return setComposerEntryAside(state, list, value)
     }
-    return showEntry(state, list, index + 1, edits)
+    return showEntry(state, list, index + 1, rememberCurrent(state, list, value))
   }
   return null
+}
+
+/**
+ * Bring the draft back but keep what the box holds as the open entry's edit,
+ * as ↓ past the newest entry does. Cancelling the open queued message uses
+ * this too: if the cancel does not go through, the message stays queued and
+ * reopening it still shows the owner's unsaved edit.
+ */
+export function setComposerEntryAside(state, entries, value) {
+  if (state.key == null) return null
+  const list = Array.isArray(entries) ? entries : []
+  return {
+    state: { ...COMPOSER_DRAFT_STATE, edits: rememberCurrent(state, list, value) },
+    value: state.draft,
+  }
 }
 
 /** Open one entry directly (a queued message's pencil), setting the draft
@@ -212,9 +226,13 @@ export function composerHistoryDirection(event) {
  * wrapping decides, which only the rendered textarea knows, so the key is
  * left to the browser and a probe checks where the caret landed.
  *
+ * `linesWrap` says whether any line of the text wraps visually (only the
+ * rendered textarea knows; see textareaHasWrappedLines). It defaults to true,
+ * the conservative answer.
+ *
  * Returns `{ when: 'now' }`, `{ when: 'after-native', probe }`, or null.
  */
-export function composerHistoryKeyPlan(event, { direction, value = '' } = {}) {
+export function composerHistoryKeyPlan(event, { direction, value = '', linesWrap = true } = {}) {
   const selection = collapsedSelection(event)
   if (!direction || !selection) return null
   const text = String(value)
@@ -225,7 +243,13 @@ export function composerHistoryKeyPlan(event, { direction, value = '' } = {}) {
   if (!lineEdge) return null
   return {
     when: 'after-native',
-    probe: { target: event.target, value: text, direction, ...selection },
+    probe: {
+      target: event.target,
+      value: text,
+      direction,
+      ...selection,
+      startMeansTop: direction === 'older' && !linesWrap,
+    },
   }
 }
 
@@ -233,10 +257,12 @@ export function composerHistoryKeyPlan(event, { direction, value = '' } = {}) {
  * Whether the browser's own ↑/↓ showed the caret was already on the edge line.
  *
  * An unchanged caret proves it. Browsers also move a caret on the first line
- * to the very start; this probe exists only while the caret is on the first
- * source line, so arriving at 0 means the top line. ↓ is stricter: landing at
- * the end can also mean a short wrapped last line clamped the caret, so only
- * an unchanged caret counts. Value and target checks discard stale probes.
+ * to the very start, which saves a second ↑ — but only when no line wraps:
+ * from the start of a wrapped first line's second row, ↑ also lands at 0
+ * while the caret was not on the top line. The plan records that as
+ * `startMeansTop`. ↓ is stricter still: landing at the end can also mean a
+ * short wrapped last line clamped the caret, so only an unchanged caret
+ * counts. Value and target checks discard stale probes.
  */
 export function composerHistoryProbeReachedBoundary(probe, target) {
   if (
@@ -249,5 +275,5 @@ export function composerHistoryProbeReachedBoundary(probe, target) {
     return false
   }
   if (target.selectionStart === probe.start) return true
-  return probe.direction === 'older' && target.selectionStart === 0
+  return probe.startMeansTop === true && target.selectionStart === 0
 }

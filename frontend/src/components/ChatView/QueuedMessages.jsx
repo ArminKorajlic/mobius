@@ -182,7 +182,7 @@ export default function QueuedMessages({
                     <ArrowRotateCw width={16} height={16} aria-hidden="true" />
                   </button>
                 )}
-                {steerActive && !rejected && (
+                {steerActive && !rejected && !inComposer && (
                   // Per-row fast-forward (owner ask, 2026-07-17): the same
                   // double-chevron as the composer's steer button, in the
                   // queue action's compact neutral well — send exactly THIS
@@ -191,6 +191,8 @@ export default function QueuedMessages({
                   // Render it with the optimistic row so the action well and
                   // cancel-X arrive together. An early tap waits for this
                   // row's queue write in ChatView before force-steering it.
+                  // The row open in the chat box has none: it would send the
+                  // saved text and ignore the edit there.
                   <button
                     type="button"
                     className="queued__action queued__steer"

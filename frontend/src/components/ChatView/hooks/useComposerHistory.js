@@ -11,6 +11,7 @@ import {
   moveComposerHistory,
   openComposerHistoryEntry,
   returnToComposerDraft,
+  setComposerEntryAside,
 } from '../composerHistory.js'
 
 /** Why a queued edit stayed in the box. Each outcome comes from the queue's
@@ -99,11 +100,15 @@ export default function useComposerHistory({
     browseRef.current, { discardEdits: true },
   )), [apply])
 
-  /** The owner removed a queued message; if it was in the box, give the box
-   * back to the draft rather than reporting it as started. */
+  /** The owner is cancelling a queued message; if it is in the box, give the
+   * box back to the draft rather than reporting it as started. The cancel can
+   * still fail and leave the message queued, so the box's text stays with it
+   * as an unsaved edit that reopening shows. */
   const discard = useCallback((key) => {
     if (browseRef.current.key !== key) return false
-    return apply(returnToComposerDraft(browseRef.current))
+    return apply(setComposerEntryAside(
+      browseRef.current, entriesRef.current, valueRef.current,
+    ))
   }, [apply])
 
   /** Typing, dictation, paste, or a menu changed the browsed text. The

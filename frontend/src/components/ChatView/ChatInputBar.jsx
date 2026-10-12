@@ -74,12 +74,12 @@
  * ║      Up walks queued messages (newest first), then sent ones;    ║
  * ║      Down comes back to the draft. They switch only from the     ║
  * ║      top or bottom line; elsewhere the caret moves natively.     ║
- * ║      The draft is kept until it is sent: edits to browsed        ║
- * ║      messages survive moves and Esc drops them. Enter saves a    ║
- * ║      queued message in place or sends an earlier one again,      ║
- * ║      then the draft returns. The queue's pencil opens its        ║
- * ║      message here too. Modifier chords and IME composition       ║
- * ║      stay native.                                                ║
+ * ║      The draft, with its attached files, is kept until it is     ║
+ * ║      sent: edits to browsed messages survive moves and Esc       ║
+ * ║      drops them. Enter saves a queued message in place or sends  ║
+ * ║      an earlier one again without the draft's files, then the    ║
+ * ║      draft returns. The queue's pencil opens its message here    ║
+ * ║      too. Modifier chords and IME composition stay native.       ║
  * ║                                                                  ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
@@ -128,6 +128,7 @@ import {
 } from './markdownClipboard.js'
 import {
   textareaUsesNativeSizing,
+  textareaHasWrappedLines,
   syncComposerTallState,
 } from './composerTextareaSizing.js'
 import {
@@ -164,12 +165,17 @@ export function PrimaryActionGlyphs({ action }) {
   )
 }
 
-function PrimaryAction({
+export function PrimaryAction({
   sending, listening, hasInput, hasUploading, showSteer, steerReady,
-  submissionBlocked, questionBlocked, sendLabel = 'Send',
+  submissionBlocked, questionBlocked, savesQueued = false,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
-  if (!questionBlocked && sending && !hasInput && showSteer) {
+  // A queued message open in the chat box is saved in place. That edits the
+  // queue rather than sending, so a running turn, a waiting question card, and
+  // the draft's own uploads leave the button to it; the save reports anything
+  // that blocks it (an empty edit included) in the history strip.
+  const holdsQueuedEdit = savesQueued && !listening
+  if (!holdsQueuedEdit && !questionBlocked && sending && !hasInput && showSteer) {
     return (
       <button
         key="primary"
@@ -191,7 +197,7 @@ function PrimaryAction({
   }
   // A pending question is a protocol barrier, not queueable work. Keep the
   // draft editable, but let Stop outrank Send until the card is answered.
-  if (questionBlocked || (sending && !hasInput)) {
+  if (!holdsQueuedEdit && (questionBlocked || (sending && !hasInput))) {
     return (
       <button
         key="primary"
@@ -210,7 +216,7 @@ function PrimaryAction({
       </button>
     )
   }
-  if (hasInput && !listening) {
+  if (holdsQueuedEdit || (hasInput && !listening)) {
     return (
       <button
         key="primary"
@@ -225,13 +231,13 @@ function PrimaryAction({
         onPointerDown={(e) => e.preventDefault()}
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
-        aria-label={sendLabel}
+        aria-label={holdsQueuedEdit ? 'Save queued message' : 'Send'}
         // Offline is deliberately NOT a disable here. A send composed offline is
         // recorded in the durable outbox (chatOutbox) and auto-replays on
         // reconnect, so the button must reach doSend just like the Enter path
         // (canSubmit ignores offline). Gating it on `offline` was a leftover
         // from the old online-only composer and silently swallowed offline taps.
-        disabled={hasUploading || submissionBlocked}
+        disabled={!holdsQueuedEdit && (hasUploading || submissionBlocked)}
       >
         <PrimaryActionGlyphs action="send" />
       </button>
@@ -265,9 +271,13 @@ function PrimaryAction({
  *   input              — current textarea value
  *   onInputChange      — receives new string
  *   onInputIntent      — runs after the controlled draft accepts an edit
- *   onSubmit           — called with FormEvent | MouseEvent | TouchEvent
+ *   onSubmit           — called with FormEvent | MouseEvent | TouchEvent and
+ *                        `{ fromHistory }`: true when the box holds an
+ *                        earlier message, whose send leaves the draft's
+ *                        attached files in the composer (contract 8)
  *   onSubmitSteer      — submits composed text and immediately steers
- *                        it when a live turn can accept steering
+ *                        it when a live turn can accept steering; same
+ *                        second argument as onSubmit
  *   inputRef           — for caller to focus/blur (e.g. dismiss keyboard)
  *   sending            — agent is currently streaming
  *   listening          — voice input active
@@ -525,8 +535,11 @@ export default function ChatInputBar({
     return () => { queuedComposerRef.current = null }
   }, [queuedComposerRef, openInComposer, discardFromComposer, inputRef])
 
+  // The tray tags the row open here; a chat box that goes away takes its
+  // tag with it.
   useEffect(() => {
     onQueuedInComposerChange?.(composerHistory.queuedKey)
+    return () => onQueuedInComposerChange?.(null)
   }, [composerHistory.queuedKey, onQueuedInComposerChange])
 
   // Programmatic composer edits arrive through the controlled value boundary.
@@ -702,6 +715,9 @@ export default function ChatInputBar({
     const historyPlan = historyDirection && composerHistoryKeyPlan(e, {
       direction: historyDirection,
       value: input,
+      // Only ↑ uses it, and only a non-empty box needs the layout read.
+      linesWrap: historyDirection !== 'older' || !input
+        || textareaHasWrappedLines(e.target),
     })
     if (historyPlan?.when === 'now') {
       if (composerHistory.move(historyDirection)) e.preventDefault()
@@ -750,19 +766,22 @@ export default function ChatInputBar({
 
   // Enter and the send button. A queued message open here is saved in place
   // of the original; anything else is sent as a new message, and a draft set
-  // aside by history comes back once that send clears the box.
+  // aside by history comes back once that send clears the box. The draft's
+  // attached files belong to the draft, so an earlier message sent again from
+  // history goes without them (`fromHistory`).
   function submitComposer(e, { steer = false } = {}) {
     const savesQueued = composerHistory.position?.kind === 'queued'
     if (!savesQueued && !canSubmit) {
       e?.preventDefault?.()
       return
     }
+    const fromHistory = composerHistory.browsing
     if (composerHistory.submit() === 'handled') {
       e?.preventDefault?.()
       return
     }
-    if (steer) onSubmitSteer(e)
-    else onSubmit(e)
+    if (steer) onSubmitSteer(e, { fromHistory })
+    else onSubmit(e, { fromHistory })
   }
 
   function handleSubmit(e) {
@@ -823,12 +842,13 @@ export default function ChatInputBar({
         position={composerHistory.position}
         note={composerHistory.note}
         saving={composerHistory.saving}
+        draftFileCount={pendingFiles?.length || 0}
         touch={isTouchPrimary()}
         onBack={composerHistory.escape}
       />
       <div className="chat__input-row">
         {leftButtons}
-        <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
+        <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}${hasFiles && composerHistory.browsing ? ' chat__pill--draft-aside' : ''}`}>
           {hasFiles && (
             <FileChips
               files={pendingFiles}
@@ -876,7 +896,7 @@ export default function ChatInputBar({
               steerReady={steerReady}
               submissionBlocked={submissionBlocked}
               questionBlocked={questionBlocked}
-              sendLabel={composerHistory.position?.kind === 'queued' ? 'Save queued message' : 'Send'}
+              savesQueued={composerHistory.position?.kind === 'queued'}
               onSubmit={handleSubmit}
               onStop={onStop}
               onSteer={onSteer}

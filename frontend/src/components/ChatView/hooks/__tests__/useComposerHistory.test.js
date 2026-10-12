@@ -130,6 +130,18 @@ test('cancelling the queued message being edited gives the box back to the draft
   assert.equal(box.current.browsing, false)
 })
 
+test('a cancel that does not go through keeps the unsaved edit with its queued message', () => {
+  const box = mountComposer({ value: 'Then deploy it' })
+  box.current.open('q1')
+  box.type('Then check the dark theme, edited')
+  box.current.discard('q1')
+  assert.equal(box.props.value, 'Then deploy it', 'the draft comes back at once')
+
+  // The queue still holds q1 (the cancel failed), so reopening finds the edit.
+  box.current.open('q1')
+  assert.equal(box.props.value, 'Then check the dark theme, edited')
+})
+
 test('Esc returns to the draft from anywhere in history', () => {
   const box = mountComposer({ value: 'my draft' })
   box.current.move('older')

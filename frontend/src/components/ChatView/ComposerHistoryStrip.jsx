@@ -5,11 +5,15 @@ import { X } from '@openai/apps-sdk-ui/components/Icon'
 
 const DRAFT_PREVIEW_LENGTH = 34
 
-export function composerDraftPreview(draft) {
+/** The set-aside draft in one short line. Its attached files stay with it
+ * (an earlier message sent again goes without them), so they are counted. */
+export function composerDraftPreview(draft, fileCount = 0) {
   const flat = String(draft || '').replace(/\s+/g, ' ').trim()
-  return flat.length > DRAFT_PREVIEW_LENGTH
+  const text = flat.length > DRAFT_PREVIEW_LENGTH
     ? `${flat.slice(0, DRAFT_PREVIEW_LENGTH - 1)}…`
     : flat
+  const files = fileCount > 0 ? `${fileCount} ${fileCount === 1 ? 'file' : 'files'}` : ''
+  return [text, files].filter(Boolean).join(' · ')
 }
 
 /** The strip's title and hint for one history position. */
@@ -38,10 +42,12 @@ export function composerHistoryStripCopy(position, { touch = false, saving = fal
   }
 }
 
-export default function ComposerHistoryStrip({ position, note, saving, touch, onBack }) {
+export default function ComposerHistoryStrip({
+  position, note, saving, touch, draftFileCount = 0, onBack,
+}) {
   const copy = composerHistoryStripCopy(position, { touch, saving, note })
   if (!copy) return null
-  const draft = composerDraftPreview(position.draft)
+  const draft = composerDraftPreview(position.draft, draftFileCount)
   return (
     <div
       className={`chat__history-strip${copy.warn ? ' chat__history-strip--warn' : ''}`}

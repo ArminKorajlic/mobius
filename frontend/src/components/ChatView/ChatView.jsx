@@ -4236,7 +4236,14 @@ export default function ChatView({
     return true
   }
 
-  function handleSubmit(e) {
+  // An earlier message sent again from history (`fromHistory`, ChatInputBar
+  // contract 8) goes without the composer's attached files: they belong to the
+  // draft set aside behind it, so they stay in the composer.
+  function composerSendFiles(fromHistory) {
+    return fromHistory ? { attachments: [] } : {}
+  }
+
+  function handleSubmit(e, { fromHistory = false } = {}) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
     // During an early reveal (a no-cache open presented before the runtime
@@ -4253,7 +4260,7 @@ export default function ChatView({
     }
     const composed = input.trim()
     if (dispatchMobiusChatCommand(composed)) return
-    doSend(composed)
+    doSend(composed, composerSendFiles(fromHistory))
   }
 
   async function handleProvisionalNewChatSubmit(e) {
@@ -4265,7 +4272,7 @@ export default function ChatView({
     onNewChatSubmit?.(input)
   }
 
-  function handleSubmitSteer(e) {
+  function handleSubmitSteer(e, { fromHistory = false } = {}) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
     if (needsModelSelection({ showPicker, chatInfo })) {
@@ -4276,7 +4283,7 @@ export default function ChatView({
     const composed = input.trim()
     if (dispatchMobiusChatCommand(composed)) return
     submitSteerInFlightRef.current = true
-    void doSend(input.trim(), { directSteer: true })
+    void doSend(input.trim(), { directSteer: true, ...composerSendFiles(fromHistory) })
       .finally(() => { submitSteerInFlightRef.current = false })
   }
 

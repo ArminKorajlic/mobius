@@ -2562,6 +2562,13 @@
   .chat__history-strip { animation: none; }
 }
 
+/* While history holds the box, the attached files stay with the set-aside
+   draft (an earlier message sent again goes without them), so they are dimmed
+   rather than reading as part of the message shown. */
+.chat__pill--draft-aside .chat__attach-tray {
+  opacity: 0.5;
+}
+
 /* The pill: TRANSLUCENT surface with backdrop-blur — chat content
    visibly softens through the pill background. Hairline border and
    slight surface tint keep it readable as a card. ~48px tall to
