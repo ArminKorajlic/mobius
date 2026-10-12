@@ -1,3 +1,5 @@
+import { codeFence, inlineCodeDelimiters } from './markdownClipboard.js'
+
 export function resolveComposerEnterAction(event, {
   hasInput = false,
   canSteer = false,
@@ -62,8 +64,8 @@ export function composerFormattingMarker(event) {
  * With nothing selected it inserts a placeholder, and the returned selection
  * covers the placeholder (or the wrapped text) so typing replaces it.
  * Whitespace at the selection's edges stays outside the markers, because
- * `** bold **` is not bold. Code across several lines becomes a fenced
- * block, because inline code cannot span lines. */
+ * `** bold **` is not bold. Code keeps any backticks it contains intact
+ * (see `codeDelimiters`). */
 export function wrapComposerSelection(value, start, end, marker) {
   const current = String(value || '')
   const from = Math.max(0, Math.min(start ?? current.length, current.length))
@@ -72,14 +74,9 @@ export function wrapComposerSelection(value, start, end, marker) {
   const lead = selected.match(/^\s*/)[0]
   const trail = selected.slice(lead.length).match(/\s*$/)[0]
   const inner = selected.slice(lead.length, selected.length - trail.length) || FORMATTING_PLACEHOLDER
-  const before = `${current.slice(0, from)}${lead}`
-  const after = `${trail}${current.slice(to)}`
-  const [open, close] = marker === '`' && inner.includes('\n')
-    ? [
-        `${before && !before.endsWith('\n') ? '\n' : ''}\`\`\`\n`,
-        `\n\`\`\`${after && !after.startsWith('\n') ? '\n' : ''}`,
-      ]
-    : [marker, marker]
+  const { open, close } = marker === '`'
+    ? codeDelimiters(inner, `${current.slice(0, from)}${lead}`, `${trail}${current.slice(to)}`)
+    : { open: marker, close: marker }
   const text = `${lead}${open}${inner}${close}${trail}`
   const innerStart = from + lead.length + open.length
   return {
@@ -87,6 +84,18 @@ export function wrapComposerSelection(value, start, end, marker) {
     value: `${current.slice(0, from)}${text}${current.slice(to)}`,
     selectionStart: innerStart,
     selectionEnd: innerStart + inner.length,
+  }
+}
+
+/** Code delimiters that keep `inner` intact even when it contains backticks:
+ * an inline span, or a fenced block on its own lines when it spans several
+ * lines (inline code cannot). Shared with copy's Markdown serialization. */
+function codeDelimiters(inner, before, after) {
+  if (!inner.includes('\n')) return inlineCodeDelimiters(inner)
+  const fence = codeFence(inner)
+  return {
+    open: `${before && !before.endsWith('\n') ? '\n' : ''}${fence}\n`,
+    close: `\n${fence}${after && !after.startsWith('\n') ? '\n' : ''}`,
   }
 }
 

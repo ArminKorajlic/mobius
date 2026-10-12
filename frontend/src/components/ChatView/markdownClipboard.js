@@ -37,15 +37,25 @@ function escapeMarkdownText(text) {
     .replace(/(\d+)([.)])(?=\s)/g, '$1\\$2')
 }
 
-function inlineCode(text) {
+/** Backtick delimiters that keep `text` one inline code span: longer than any
+ * backtick run inside it, and padded with a space when it starts or ends with
+ * a backtick or a space (CommonMark strips one padding space per side). The
+ * composer's code shortcut shares this rule with copy. */
+export function inlineCodeDelimiters(text) {
   const value = String(text || '')
   const runs = value.match(/`+/g) || []
   const fence = '`'.repeat(Math.max(1, ...runs.map(run => run.length + 1)))
-  const needsPadding = /^`|`$|^\s|\s$/.test(value)
-  return `${fence}${needsPadding ? ' ' : ''}${value}${needsPadding ? ' ' : ''}${fence}`
+  const padding = /^`|`$|^\s|\s$/.test(value) ? ' ' : ''
+  return { open: `${fence}${padding}`, close: `${padding}${fence}` }
 }
 
-function codeFence(text) {
+function inlineCode(text) {
+  const { open, close } = inlineCodeDelimiters(text)
+  return `${open}${String(text || '')}${close}`
+}
+
+/** A code-block fence longer than any backtick fence inside `text`. */
+export function codeFence(text) {
   const runs = String(text || '').match(/`{3,}/g) || []
   return '`'.repeat(Math.max(3, ...runs.map(run => run.length + 1)))
 }

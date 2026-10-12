@@ -10,6 +10,7 @@ import {
   wrapComposerSelection,
 } from '../composerShortcuts.js'
 import { findShellShortcut, resolveShellCommands } from '../../../lib/keyboardShortcuts.js'
+import { Marked } from 'marked'
 
 const enter = (overrides = {}) => ({ key: 'Enter', ...overrides })
 
@@ -232,6 +233,26 @@ test('code across several lines becomes a fenced block on its own lines', () => 
   assert.equal(edit.value, 'see: \n```\na\nb\n```\n then')
   assert.equal(edit.value.slice(edit.selectionStart, edit.selectionEnd), 'a\nb')
   assert.equal(wrapComposerSelection('a\nb', 0, 3, '`').value, '```\na\nb\n```')
+})
+
+test('code formatting keeps backticks inside the selection in one code span', () => {
+  const md = new Marked()
+  for (const selected of ['run `npm test` now', '`x`', 'a ``b`` c']) {
+    const edit = wrapComposerSelection(selected, 0, selected.length, '`')
+    const [paragraph] = md.lexer(edit.value)
+    assert.deepEqual(paragraph.tokens.map(token => [token.type, token.text]), [['codespan', selected]],
+      `one code span for ${selected}`)
+    assert.equal(edit.value.slice(edit.selectionStart, edit.selectionEnd), selected)
+  }
+})
+
+test('code formatting around a selection that holds a fence uses a longer fence', () => {
+  const selected = 'a\n```js\nx()\n```'
+  const edit = wrapComposerSelection(`${selected}\nafter`, 0, selected.length, '`')
+  const [block] = new Marked().lexer(edit.value)
+  assert.equal(block.type, 'code')
+  assert.equal(block.text, selected)
+  assert.equal(edit.value.slice(edit.selectionStart, edit.selectionEnd), selected)
 })
 
 test('pasting a web address over selected text makes a Markdown link', () => {
