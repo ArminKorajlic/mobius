@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from app import app_apply, app_git, install, models, transcript_rows
 from app.config import get_settings
@@ -197,6 +198,25 @@ def test_install_rejects_a_scheduled_job_without_runtime_declaration(
 
   assert response.status_code == 400
   assert response.json()["detail"] == "Schedule job is missing a shebang."
+
+
+def test_package_fetch_resolves_its_host_off_the_event_loop(monkeypatch):
+  """getaddrinfo blocks, so a fetch must not resolve on the server's loop."""
+  url = "https://x.test/repo/mobius.json"
+  on_loop = []
+
+  def validate(target):
+    try:
+      asyncio.get_running_loop()
+      on_loop.append(True)
+    except RuntimeError:
+      on_loop.append(False)
+    return target, "x.test", "x.test"
+
+  monkeypatch.setattr(install, "_validate_url_safe", validate)
+  client = _fake_async_client({url: (200, b"{}")})()
+  assert asyncio.run(install._http_get(client, url, 1024)) == b"{}"
+  assert on_loop == [False]
 
 
 def test_validate_url_safe_blocks_ipv6_embedded_ipv4():
@@ -1068,15 +1088,6 @@ def test_commit_pinned_install_clones_exact_reviewed_commit(
 ):
   """A commit-pinned install is a real clone fixed to the reviewed commit."""
   pinned_jsx = "export default function App() { return <div>pinned git</div> }"
-  work, bare, commit = _make_clone_fixture(
-    tmp_path, pinned_jsx, "export const cards = ['pinned']",
-  )
-  _push_clone_fixture(
-    work, bare,
-    "export default function App() { return <div>later tip</div> }",
-    "export const cards = ['later']",
-  )
-  base = f"https://raw.githubusercontent.com/acme/pinned/{commit}/"
   manifest = {
     "id": "pinned-fetch",
     "name": "Pinned Fetch",
@@ -1085,6 +1096,15 @@ def test_commit_pinned_install_clones_exact_reviewed_commit(
     "entry": "index.jsx",
     "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
   }
+  work, bare, commit = _make_clone_fixture(
+    tmp_path, pinned_jsx, "export const cards = ['pinned']", manifest,
+  )
+  _push_clone_fixture(
+    work, bare,
+    "export default function App() { return <div>later tip</div> }",
+    "export const cards = ['later']",
+  )
+  base = f"https://raw.githubusercontent.com/acme/pinned/{commit}/"
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
     base + "index.jsx": (200, pinned_jsx.encode()),
@@ -1154,7 +1174,8 @@ def test_known_git_origin_clone_failure_rolls_back_instead_of_importing_http(
   with patch(
     "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
   ), patch(
-    "app.install.app_git.stage_clone", side_effect=RuntimeError("offline"),
+    "app.install.app_git.stage_clone",
+    side_effect=app_git.GitTransferFailed("Could not resolve host"),
   ):
     failed = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json",
@@ -1166,7 +1187,9 @@ def test_known_git_origin_clone_failure_rolls_back_instead_of_importing_http(
   source_dir = Path(get_settings().data_dir) / "apps" / "required-git"
   assert not source_dir.exists()
 
-  _, bare, commit = _make_clone_fixture(tmp_path, JSX, "export const cards = []")
+  _, bare, commit = _make_clone_fixture(
+    tmp_path, JSX, "export const cards = []", manifest,
+  )
   with patch(
     "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
   ), patch("app.install._derive_repo_ref", return_value=(bare.as_uri(), "main")):
@@ -1178,18 +1201,99 @@ def test_known_git_origin_clone_failure_rolls_back_instead_of_importing_http(
   assert app_git.head_sha(source_dir, "upstream") == commit
 
 
+def test_root_manifest_not_named_mobius_json_installs_over_http(
+  client, auth, db, bypass_url_validation,
+):
+  """A Git package is read from its root mobius.json, so a root manifest with
+  another name is imported over HTTP rather than cloned."""
+  base = "https://raw.githubusercontent.com/acme/other-name/main/"
+  manifest = {
+    "id": "other-name", "name": "Other Name", "version": "1.0.0",
+    "description": "Root manifest named app.json", "entry": "index.jsx",
+  }
+  assert install._derive_repo_ref(base + "app.json") is None
+  responses = {
+    base + "app.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ), patch(
+    "app.install.app_git.stage_clone",
+    side_effect=AssertionError("a non-mobius.json manifest must not be cloned"),
+  ):
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "app.json",
+    })
+  assert response.status_code == 201, response.text
+  source_dir = Path(get_settings().data_dir) / "apps" / "other-name"
+  assert (source_dir / "index.jsx").read_text() == JSX
+
+
+def test_install_refuses_both_a_manifest_url_and_an_inline_manifest(
+  client, auth, db, bypass_url_validation,
+):
+  base = "https://raw.githubusercontent.com/acme/both/main/"
+  manifest = {
+    "id": "both", "name": "Both", "version": "1.0.0",
+    "description": "Two sources", "entry": "index.jsx",
+  }
+  with patch(
+    "app.install.app_git.stage_clone",
+    side_effect=AssertionError("refused before any transfer"),
+  ):
+    response = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json", "manifest": manifest,
+      "raw_base": base,
+    })
+  assert response.status_code == 400, response.text
+  assert "exactly one" in response.json()["detail"]
+  assert db.query(models.App).filter_by(slug="both").first() is None
+
+
+def test_clone_failure_on_a_full_disk_is_not_retryable(
+  client, auth, db, bypass_url_validation,
+):
+  """Only a transient failure is marked retryable; a full disk fails again."""
+  import errno
+
+  base = "https://raw.githubusercontent.com/acme/full-disk/main/"
+  manifest = {
+    "id": "full-disk", "name": "Full Disk", "version": "1.0.0",
+    "description": "Staging fails locally", "entry": "index.jsx",
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses),
+  ), patch(
+    "app.install.app_git.stage_clone",
+    side_effect=OSError(errno.ENOSPC, "No space left on device"),
+  ):
+    failed = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+  assert failed.status_code == 409, failed.text
+  assert failed.json()["detail"]["code"] == "git_install_unavailable"
+  assert failed.json()["detail"]["retryable"] is False
+  assert db.query(models.App).filter_by(slug="full-disk").first() is None
+
+
 def test_fresh_clone_cannot_replace_owner_reviewed_source(
   client, auth, db, tmp_path, bypass_url_validation,
 ):
   from app import install
-  _, bare, commit = _make_clone_fixture(
-    tmp_path, JSX.replace("ok", "unreviewed change"), "export const cards = []",
-  )
   base = "https://raw.githubusercontent.com/acme/reviewed/main/"
   manifest = {
     "id": "reviewed", "name": "Reviewed", "version": "1.0.0",
     "description": "Reviewed source is binding", "entry": "index.jsx",
   }
+  _, bare, commit = _make_clone_fixture(
+    tmp_path, JSX.replace("ok", "unreviewed change"), "export const cards = []",
+    manifest,
+  )
   digest = install.package_content_digest(
     manifest=manifest, entry_bytes=JSX.encode(), bundled_job=None, source_files={},
     icon_processed=None, static_assets={}, seeds={},
@@ -1204,9 +1308,10 @@ def test_fresh_clone_cannot_replace_owner_reviewed_source(
     response = client.post("/api/apps/install", headers=auth, json={
       "manifest_url": base + "mobius.json", "reviewed_source_digest": digest,
     })
+  # The package is read from the clone itself, so the reviewed digest binds
+  # the exact bytes that would be adopted.
   assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "git_source_mismatch"
-  assert response.json()["detail"]["retryable"] is True
+  assert response.json()["detail"]["code"] == "update_changed"
   assert db.query(models.App).filter_by(slug="reviewed").first() is None
   assert not (Path(get_settings().data_dir) / "apps" / "reviewed").exists()
 
@@ -1216,12 +1321,14 @@ def test_cancelled_install_rolls_back_only_after_its_git_worker_exits(
 ):
   from app import install
 
-  _, bare, commit = _make_clone_fixture(tmp_path, JSX, "export const cards = []")
   base = "https://raw.githubusercontent.com/acme/cancelled/main/"
   manifest = {
     "id": "cancelled", "name": "Cancelled", "version": "1.0.0",
     "description": "Cancelled mid-install", "entry": "index.jsx",
   }
+  _, bare, commit = _make_clone_fixture(
+    tmp_path, JSX, "export const cards = []", manifest,
+  )
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
     base + "index.jsx": (200, JSX.encode()),
@@ -1233,23 +1340,23 @@ def test_cancelled_install_rolls_back_only_after_its_git_worker_exits(
   monkeypatch.setattr(install, "_derive_repo_ref", lambda url: (bare.as_uri(), commit))
 
   async def cancelled_install():
-    staged = await install.stage_package_clone(base + "mobius.json")
+    prepared = await install.prepare_package(base + "mobius.json")
     try:
       await install.install_from_manifest(
         db, manifest_url=base + "mobius.json", manifest=None, raw_base=None,
-        staged_clone=staged,
+        prepared=prepared,
       )
     finally:
-      install.discard_staged(staged)
+      install.discard_staged(prepared.staged_clone)
 
-  def unverifiable():
-    raise RuntimeError("Git package is missing declared source cards.js")
+  def refused():
+    raise HTTPException(409, "The adopted clone cannot be committed.")
 
   caplog.set_level(logging.INFO, logger="mobius.install")
   _assert_cancellation_drains_worker_under_lock(
     source_dir, cancelled_install, monkeypatch,
-    install, "_verify_git_install_candidate",
-    while_blocked=lambda: source_dir.is_dir(), then=unverifiable,
+    install.app_git, "commit_local",
+    while_blocked=lambda: source_dir.is_dir(), then=refused,
   )
   db.expire_all()
   assert db.query(models.App).filter_by(slug="cancelled").first() is None
@@ -1719,6 +1826,67 @@ def test_install_rolls_back_on_compile_failure(client, auth, bypass_url_validati
   list_r = client.get("/api/apps/", headers=auth)
   slugs = [a["slug"] for a in list_r.json()]
   assert "rollback-target" not in slugs
+
+
+def test_install_reports_a_stalled_build_as_structured_environment_503(
+  client, auth, bypass_url_validation,
+):
+  """A stalled build is not a compile failure: same refusal shape as apply."""
+  from app.app_compile_contract import RolldownStalled
+
+  base = "https://x.test/stalled/"
+  responses = {
+    base + "mobius.json": (200, json.dumps({
+      **MANIFEST_NEWS, "id": "stalled-target",
+    }).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+
+  async def stalled(*_args, **_kwargs):
+    raise RolldownStalled()
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.install.compile_jsx", side_effect=stalled):
+    r = client.post("/api/apps/install", headers=auth, json={
+      "manifest_url": base + "mobius.json",
+    })
+
+  assert r.status_code == 503, r.text
+  assert r.json()["detail"] == RolldownStalled().detail()
+  assert r.json()["detail"]["code"] == "build_stalled"
+  slugs = [a["slug"] for a in client.get("/api/apps/", headers=auth).json()]
+  assert "stalled-target" not in slugs
+
+
+@pytest.mark.asyncio
+async def test_ancillary_resolution_does_not_swallow_a_stalled_build():
+  """A stall proves nothing about bundle equality, so it must surface."""
+  from app.app_compile_contract import RolldownStalled
+
+  manifest = {
+    "id": "stall-check", "name": "Stall", "version": "1.0.0",
+    "entry": "index.jsx", "description": "Stall check",
+  }
+
+  async def stalled(*_args, **_kwargs):
+    raise RolldownStalled()
+
+  from fastapi import HTTPException
+
+  with patch("app.install.compile_jsx", side_effect=stalled), \
+      pytest.raises(HTTPException) as exc:
+    await install._kept_local_bundle_unchanged(
+      {"index.jsx": b"export default function App() { return null }"},
+      manifest, {}, {}, ["README.md"],
+    )
+
+  assert exc.value.status_code == 503
+  assert exc.value.detail["code"] == "build_stalled"
 
 
 def test_install_inline_manifest_requires_raw_base(client, auth):
@@ -3326,6 +3494,20 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
   assert update.status_code == 200, update.text
   assert update.json()["update_available"] is True
   assert update.json()["pending_update_state"] == "needs_resolution"
+
+  # The pre-install review reports the same pending state, so the Store can
+  # block the install instead of re-entering the resolver.
+  def preview_state():
+    with _git_update_source(
+      _git_candidate({**m, "version": "2.0.0"}, jsx_v2),
+    ):
+      preview = client.get(
+        f"/api/apps/{payload['id']}/update-candidate-preview", headers=auth,
+      )
+    assert preview.status_code == 200, preview.text
+    return preview.json()["pending_update_state"]
+
+  assert preview_state() == "needs_resolution"
   assert update.json()["needs_resolution"] is True
   assert update.json()["upstream_version"] == "2.0.0"
   bypass = client.patch(
@@ -3368,6 +3550,7 @@ def test_git_conflicting_update_leaves_source_unchanged_until_resolve(
     f"/api/apps/{payload['id']}/update-check", headers=auth,
   )
   assert resolved_update.json()["pending_update_state"] == "replay_pending"
+  assert preview_state() == "replay_pending"
   redundant_resolver = client.post(
     f"/api/apps/{payload['id']}/conflict-resolver-chat", headers=auth,
   )
@@ -5234,6 +5417,7 @@ def test_update_candidate_preview_fetches_incoming_diff_without_mutation(
   assert "a/index.jsx" in payload["upstream_diff"]
   assert "b/index.jsx" in payload["upstream_diff"]
   assert len(payload["source_digest"]) == 64
+  assert payload["pending_update_state"] == "none"
   assert jsx_file.read_text() == before
 
   changed_after_review = jsx_v2.replace("INCOMING FOOTER", "MOVED AGAIN")
@@ -5265,7 +5449,7 @@ def test_update_candidate_preview_classifies_git_transfer_timeout_without_mutati
     "id": "preview-timeout", "name": "Preview timeout", "version": "1.0.0",
     "description": "Git preview timeout", "entry": "index.jsx",
   }
-  _, bare, _ = _make_clone_fixture(tmp_path, JSX_MULTI, "")
+  _, bare, _ = _make_clone_fixture(tmp_path, JSX_MULTI, "", manifest)
   installed = _install_clone_fixture(
     client, auth, base, manifest, JSX_MULTI, "", bare,
   )
@@ -7374,12 +7558,14 @@ def _serve_github_from(bare: Path, github_url: str):
     yield
 
 
-def _make_clone_fixture(tmp_path, index: str, cards: str):
+def _make_clone_fixture(tmp_path, index: str, cards: str, manifest=None):
   work = tmp_path / "catalog-work"
   bare = tmp_path / "catalog.git"
   subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
   (work / "index.jsx").write_text(index, encoding="utf-8")
   (work / "cards.js").write_text(cards, encoding="utf-8")
+  if manifest is not None:
+    (work / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
   head = _fixture_commit(work, "v1")
   subprocess.run(
     ["git", "clone", "-q", "--bare", str(work), str(bare)],
@@ -7389,9 +7575,13 @@ def _make_clone_fixture(tmp_path, index: str, cards: str):
   return work, bare, head
 
 
-def _push_clone_fixture(work: Path, bare: Path, index: str, cards: str) -> str:
+def _push_clone_fixture(
+  work: Path, bare: Path, index: str, cards: str, manifest=None,
+) -> str:
   (work / "index.jsx").write_text(index, encoding="utf-8")
   (work / "cards.js").write_text(cards, encoding="utf-8")
+  if manifest is not None:
+    (work / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
   head = _fixture_commit(work, "update")
   subprocess.run(
     ["git", "-C", str(work), "push", "-q", str(bare), "main"],
@@ -7444,7 +7634,7 @@ def test_clone_update_fast_forward_uses_full_origin_tree(
     "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
   }
   work, bare, _ = _make_clone_fixture(
-    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1, manifest,
   )
   r1 = _install_clone_fixture(
     client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
@@ -7453,7 +7643,9 @@ def test_clone_update_fast_forward_uses_full_origin_tree(
 
   index_v2 = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_V2")
   cards_v2 = CLONE_CARDS_V1.replace("CARD_V1", "CARD_V2")
-  new_head = _push_clone_fixture(work, bare, index_v2, cards_v2)
+  new_head = _push_clone_fixture(
+    work, bare, index_v2, cards_v2, {**manifest, "version": "2.0.0"},
+  )
   r2 = _install_clone_fixture(
     client, auth, base, {**manifest, "version": "2.0.0"},
     index_v2, CLONE_CARDS_V1, bare,
@@ -7486,7 +7678,7 @@ def test_clone_update_diverged_clean_merge_carries_local_and_origin(
     "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
   }
   work, bare, _ = _make_clone_fixture(
-    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1, manifest,
   )
   r1 = _install_clone_fixture(
     client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
@@ -7499,7 +7691,9 @@ def test_clone_update_diverged_clean_merge_carries_local_and_origin(
   )
 
   cards_v2 = CLONE_CARDS_V1.replace("FOOTER_V1", "FOOTER_V2")
-  _push_clone_fixture(work, bare, CLONE_INDEX_V1, cards_v2)
+  _push_clone_fixture(
+    work, bare, CLONE_INDEX_V1, cards_v2, {**manifest, "version": "2.0.0"},
+  )
   r2 = _install_clone_fixture(
     client, auth, base, {**manifest, "version": "2.0.0"},
     CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
@@ -7528,7 +7722,7 @@ def test_clone_update_conflict_keeps_served_old_source(
     "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
   }
   work, bare, _ = _make_clone_fixture(
-    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1, manifest,
   )
   r1 = _install_clone_fixture(
     client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
@@ -7539,7 +7733,9 @@ def test_clone_update_conflict_keeps_served_old_source(
   (src / "index.jsx").write_text(local_index, encoding="utf-8")
 
   upstream_index = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_UPSTREAM")
-  _push_clone_fixture(work, bare, upstream_index, CLONE_CARDS_V1)
+  _push_clone_fixture(
+    work, bare, upstream_index, CLONE_CARDS_V1, {**manifest, "version": "2.0.0"},
+  )
   r2 = _install_clone_fixture(
     client, auth, base, {**manifest, "version": "2.0.0"},
     upstream_index, CLONE_CARDS_V1, bare,
@@ -7578,7 +7774,7 @@ def test_clone_update_fetch_failure_preserves_installed_git_revision(
     "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
   }
   work, bare, _ = _make_clone_fixture(
-    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1,
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1, manifest,
   )
   r1 = _install_clone_fixture(
     client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
@@ -7588,7 +7784,9 @@ def test_clone_update_fetch_failure_preserves_installed_git_revision(
 
   index_v2 = CLONE_INDEX_V1.replace("TITLE_V1", "TITLE_HTTP_V2")
   cards_v2 = CLONE_CARDS_V1.replace("CARD_V1", "CARD_HTTP_V2")
-  _push_clone_fixture(work, bare, index_v2, cards_v2)
+  _push_clone_fixture(
+    work, bare, index_v2, cards_v2, {**manifest, "version": "2.0.0"},
+  )
   with patch("app.app_git.import_staged", side_effect=RuntimeError("offline")):
     r2 = _install_clone_fixture(
       client, auth, base, {**manifest, "version": "2.0.0"},
@@ -7606,7 +7804,7 @@ def test_clone_update_fetch_failure_preserves_installed_git_revision(
 def test_real_git_review_drift_does_not_advance_installed_upstream(
   client, auth, db, tmp_path, bypass_url_validation, drift_kind,
 ):
-  """The immutable Git package must match every byte reviewed over HTTP."""
+  """The Git package an update adopts must match every byte the owner reviewed."""
   from app import install
 
   base = f"https://raw.githubusercontent.com/acme/review-drift-{drift_kind}/main/"
@@ -7689,7 +7887,7 @@ def test_real_git_review_drift_does_not_advance_installed_upstream(
     })
 
   assert rejected.status_code == 409, rejected.text
-  assert rejected.json()["detail"]["code"] == "git_source_mismatch"
+  assert rejected.json()["detail"]["code"] == "update_changed"
   assert app_git.head_sha(source_dir, "upstream") == first
   assert (source_dir / "index.jsx").read_text() == local
   row = db.query(models.App).populate_existing().filter_by(
@@ -7752,6 +7950,7 @@ def test_untrusted_synthetic_origin_fails_without_rewriting_history(
     tmp_path,
     "import './cards.js'\nexport default () => <div>REAL_REPO</div>\n",
     "export const card = 'REAL_CARD'\n",
+    {**manifest, "version": "2.0.0"},
   )
   app_git._run(src, "remote", "add", "origin", bare.as_uri())
   app_git._run(src, "fetch", "--depth", "1", "origin", "main")
@@ -7778,7 +7977,7 @@ def test_untrusted_synthetic_origin_fails_without_rewriting_history(
     })
 
   assert r2.status_code == 409, r2.text
-  assert r2.json()["detail"]["code"] == "git_source_mismatch"
+  assert r2.json()["detail"]["code"] == "git_update_unavailable"
   assert (src / "index.jsx").read_text() == index_v1
   assert (src / "cards.js").read_text() == cards_v1
   assert app_git.head_sha(src, app_git.UPSTREAM_BRANCH) == db_upstream
@@ -10546,7 +10745,9 @@ def test_update_git_transfer_timeout_preserves_installed_revision(
     "id": "fetch-ceiling", "name": "Fetch ceiling", "version": "1.0.0",
     "description": "Locked update transfer", "entry": "index.jsx",
   }
-  _, bare, first = _make_clone_fixture(tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1)
+  _, bare, first = _make_clone_fixture(
+    tmp_path, CLONE_INDEX_V1, CLONE_CARDS_V1, manifest,
+  )
   installed = _install_clone_fixture(
     client, auth, base, manifest, CLONE_INDEX_V1, CLONE_CARDS_V1, bare,
   )
@@ -10705,3 +10906,25 @@ async def test_ancillary_source_check_and_tree_writes_leave_event_loop(monkeypat
   assert len(checked) == 1 and checked[0] != event_loop_thread
   assert len(writes) == 3 and all(thread != event_loop_thread for thread in writes)
   assert len(entries) == 2 and entries[0] == entries[1]
+
+
+@pytest.mark.parametrize("candidate_package_id, expected", [
+  ("urn:uuid:6a1f0c2e-7b3d-5e4f-9a8b-1c2d3e4f5a6b", True),
+  ("urn:uuid:0b9e8d7c-6a5f-5e4d-8c3b-2a1f0e9d8c7b", False),
+  (None, False),
+])
+def test_update_match_requires_the_installed_package_id(
+  candidate_package_id, expected,
+):
+  """A packaged app matches only a candidate carrying its own package_id."""
+  from app.routes.apps import _update_candidate_matches_installed
+
+  manifest = {"id": "renamed"}
+  if candidate_package_id is not None:
+    manifest["package_id"] = candidate_package_id
+  assert _update_candidate_matches_installed(
+    "https://example.test/old/mobius.json",
+    "https://example.test/new/mobius.json",
+    manifest,
+    "urn:uuid:6a1f0c2e-7b3d-5e4f-9a8b-1c2d3e4f5a6b",
+  ) is expected

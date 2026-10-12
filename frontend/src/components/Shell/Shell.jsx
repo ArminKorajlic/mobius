@@ -31,6 +31,7 @@ import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
+import { settingsSectionOrNull } from '../../lib/settingsSections.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -100,6 +101,10 @@ import {
   appAttentionIds,
   freshChatBuiltApps,
   freshAppIds,
+  applyAppActivityEvent,
+  applyAppActivitySeenEvent,
+  reconcileSeenAppActivity,
+  rememberSeenAppActivity,
   withAppActivitySeen,
   withAppsFlagged,
   withoutAppFlagged,
@@ -213,12 +218,6 @@ import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 import { rememberRecentDestination } from '../../lib/recentSelections.js'
 import { isSharedBrowserRoute, sharedBrowserRoutePath, sharedBrowserStorageForGrant } from '../../lib/sharedBrowserWorkspace.js'
 
-const APP_SETTINGS_SECTIONS = new Set([
-  'ai-providers',
-  'background-agents',
-  'github',
-  'models',
-])
 const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
 // they need a short deadline rather than holding notifications behind a stalled request.
@@ -699,8 +698,14 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // pre-delete NetworkFirst fallback) until a recovery succeeds.
   const deletedChatIdsRef = useRef(new Set())
   const deletedAppIdsRef = useRef(new Set())
+  // Highest acknowledged version per app lifetime. Retain old lifetimes for
+  // this mounted session so delayed receipts/events cannot cross ID reuse.
+  const appActivitySeenThroughRef = useRef(new Map())
   const reconcileApps = useCallback(
-    rows => withoutConfirmedDeletions(rows, deletedAppIdsRef.current),
+    rows => reconcileSeenAppActivity(
+      withoutConfirmedDeletions(rows, deletedAppIdsRef.current),
+      appActivitySeenThroughRef.current,
+    ),
     [],
   )
   const appsQuery = appQueries.list.useQuery({ reconcile: reconcileApps })
@@ -2367,15 +2372,22 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       const app = apps.find(row => Number(row.id) === appId)
       if (!app?.has_unseen_activity || !app?.unseen_activity_version) continue
       const observedActivityVersion = app.unseen_activity_version
+      const appCreatedAt = app.created_at
       acknowledgeAppActivity({
         appId,
         activityVersion: observedActivityVersion,
+        appCreatedAt,
         inFlight: appActivityAckRef.current,
         request: api.apps.markActivitySeen,
+        confirmSeen: (seenAppId, seenThroughVersion) => {
+          rememberSeenAppActivity(
+            appActivitySeenThroughRef.current, seenAppId, appCreatedAt, seenThroughVersion,
+          )
+        },
         clearCached: (seenAppId, seenThroughVersion) => {
           queryClient.setQueryData(
             appQueries.keys.all,
-            rows => withAppActivitySeen(rows, seenAppId, seenThroughVersion),
+            rows => withAppActivitySeen(rows, seenAppId, seenThroughVersion, appCreatedAt),
           )
         },
         restoreServerTruth: () => appQueries.list.invalidate(queryClient),
@@ -2701,8 +2713,18 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     navToRef,
   })
 
+  // The one way the shell opens Settings for someone else (a mini-app, the
+  // agent's open_item, a notification tap): navigate there and focus a known
+  // section. Navigation only; every action inside Settings stays the owner's.
+  const openSettingsSection = useCallback((section) => {
+    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
+    if (activeViewRef.current !== 'settings') navToRef.current('settings')
+  }, [activeViewRef])
+
   const handleNotificationOpen = useCallback((target) => {
-    if (target?.view === 'canvas') {
+    if (target?.view === 'settings') {
+      openSettingsSection(target.section)
+    } else if (target?.view === 'canvas') {
       void openAppWithIntent(target.app, target.intent)
     } else if (target?.view === 'chat') {
       if (target.focusQuestion === true) requestChatQuestionReveal(target.chatId)
@@ -2717,7 +2739,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       if (project) openProjectRef.current(project)
       else navToRef.current('projects')
     }
-  }, [openAppWithIntent, requestComposer])
+  }, [openAppWithIntent, openSettingsSection, requestComposer])
 
   const coldDeepLinkHandledRef = useRef(false)
   useEffect(() => {
@@ -2855,13 +2877,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         await openAppWithIntent(request.appId, request.intent)
         return
       }
-      const section = APP_SETTINGS_SECTIONS.has(request.section)
-        ? request.section
-        : 'ai-providers'
-      setSettingsFocusTarget({ section, nonce: Date.now() })
-      if (activeViewRef.current !== 'settings') navToRef.current('settings')
+      openSettingsSection(settingsSectionOrNull(request.section) ?? 'ai-providers')
     })()
-  }, [openAppWithIntent, queryClient, refreshChats, requestComposer])
+  }, [openAppWithIntent, openSettingsSection, queryClient, refreshChats, requestComposer])
 
   // Restore the active chat after Shell mount. Two cache layers can
   // satisfy this effect: (1) the persisted TanStack cache hydrated
@@ -3050,11 +3068,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Allowance changes leave sign-in and available models unchanged.
       void settingsQueries.providerUsage.reset(queryClient, ev.provider)
     } else if (ev.type === 'app_activity') {
-      // A durable activity marker (an app-attributed notification) or the
-      // app's reported unread badge changed. A refetch surfaces the dot or
-      // pill; if the app is already visible, the effect
-      // above immediately acknowledges it instead of leaving a stale nudge.
-      void invalidateShellListCache('apps').then(refreshApps)
+      // Versioned notification activity updates one cached app. Badge changes
+      // and unknown markers still require the authoritative list.
+      if (!applyAppActivityEvent(
+        queryClient, appQueries.keys.all, ev, appActivitySeenThroughRef.current,
+      )) void invalidateShellListCache('apps').then(refreshApps)
+    } else if (ev.type === 'app_activity_seen') {
+      applyAppActivitySeenEvent(
+        queryClient, appQueries.keys.all, ev, appActivitySeenThroughRef.current,
+      )
     } else if (ev.type === 'chat_deleted') {
       // Exact mutation evidence from this or another live tab. Update the
       // in-memory drawer synchronously; the normal missing-active-chat effect
@@ -3203,6 +3225,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           }
         }
       })
+    } else if (ev.type === 'open_item' && ev.itemKind === 'settings') {
+      // Settings is the shell's single Settings screen, not a placeable
+      // workspace item: the agent's open navigates there like a mini-app's
+      // moebius:open-settings. An id this shell does not know (a newer
+      // backend's section) still opens Settings, just without a focus.
+      openSettingsSection(settingsSectionOrNull(ev.itemId))
     } else if (ev.type === 'open_item') {
       // An explicit agent-initiated open (design §6.3), system-bus-only so it
       // fires exactly once. Confirm the item actually exists in fresh server
@@ -3260,12 +3288,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         if (!ev.compacting) markChatRunReconcile(ev.chatId)
       }
     } else if (ev.type === 'chat_wait_changed') {
-      if (ev.chatId) {
-        // Self-resuming handoffs are durable chat state, not a running turn.
-        // Reconcile ChatView immediately and refresh the compact list so its
-        // Waiting card and Recents marker agree across tabs and reconnects.
-        markChatRunReconcile(ev.chatId)
-        refreshChatRows(ev.chatId)
+      const changedChatId = ev.chat_id ?? ev.chatId
+      if (changedChatId) {
+        // Goal and Wait invalidations use the same always-live reconciliation owner.
+        markChatRunReconcile(changedChatId)
+        refreshChatRows(changedChatId)
       }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {
@@ -3389,8 +3416,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
     markChatOwnerInput, markChatRunState, markShellUpdateAvailable,
     markStreamingAcknowledged, markStreamingEnd, observeManagedAppEvent,
-    onNotificationCreated, placeInWorkspace, projectChatLookup, queryClient,
-    refreshApps, refreshChatRows, refreshChats, tombstoneRoute, warmAppCode,
+    onNotificationCreated, openSettingsSection, placeInWorkspace, projectChatLookup,
+    queryClient, refreshApps, refreshChatRows, refreshChats, tombstoneRoute, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -3470,6 +3497,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       const target = parseNotificationTarget(e.data.target)
       if (target?.view === 'canvas') void openAppWithIntent(target.app, target.intent)
       else if (target?.view === 'chat') navTo('chat', { chatId: target.chatId })
+      else if (target?.view === 'settings') openSettingsSection(target.section)
     }
 
     if (navigator.serviceWorker) {
@@ -3480,7 +3508,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         navigator.serviceWorker.removeEventListener('message', onSwMessage)
       }
     }
-  }, [navTo, openAppWithIntent])
+  }, [navTo, openAppWithIntent, openSettingsSection])
 
   // Resolve a deferred candidate or allocate a fresh row. Ordinary Standard
   // New Chat never reaches this with the visible blank: that is a synchronous
