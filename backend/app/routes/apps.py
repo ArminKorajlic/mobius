@@ -58,6 +58,7 @@ from app.terminal_output import readable_output
 from app.app_capabilities import (
   contract_and_digest, contract_from_manifest, diff_contracts,
 )
+from app.app_compile_contract import RolldownStalled
 from app.broadcast import get_system_broadcast
 from app.recovery_notifications import (
   complete_recovery_action,
@@ -1371,6 +1372,28 @@ def _pending_update_state(repo: Path, upstream_commit: str) -> Literal[
   return "replay_pending" if resolved else "needs_resolution"
 
 
+def _read_pending_update(repo: Path, app_id: int) -> tuple[
+  dict | None,
+  Literal["needs_resolution", "replay_pending", "unknown"] | None,
+]:
+  """Read a pending update's receipt and Git phase in one snapshot.
+
+  Callers hold the app's source-dir lock, so update-check and the candidate
+  preview report the same state.
+  """
+  from app import install
+
+  current_upstream = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  receipt = install.read_pending_conflict_update_receipt(
+    repo, app_id=app_id, upstream_commit=current_upstream,
+  )
+  state = (
+    _pending_update_state(repo, receipt["upstream_commit"])
+    if receipt is not None else None
+  )
+  return receipt, state
+
+
 def _update_candidate_matches_installed(
   installed_manifest_url: str,
   candidate_manifest_url: str,
@@ -1507,21 +1530,6 @@ async def update_check(
   ):
     return _unknown()
 
-  def _current_pending_update() -> tuple[
-    dict | None,
-    Literal["needs_resolution", "replay_pending", "unknown"] | None,
-  ]:
-    """Read receipt identity and Git phase at one source-lock snapshot."""
-    current_upstream = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
-    receipt = install.read_pending_conflict_update_receipt(
-      repo, app_id=target_app_id, upstream_commit=current_upstream,
-    )
-    state = (
-      _pending_update_state(repo, receipt["upstream_commit"])
-      if receipt is not None else None
-    )
-    return receipt, state
-
   def _pending_result(
     receipt: dict,
     state: Literal["needs_resolution", "replay_pending", "unknown"],
@@ -1539,7 +1547,7 @@ async def update_check(
   async with fs_locks.source_dir_lock(str(repo)):
     try:
       pending, pending_state = await asyncio.to_thread(
-        _current_pending_update,
+        _read_pending_update, repo, target_app_id,
       )
     except (OSError, subprocess.SubprocessError):
       return _unknown()
@@ -1575,7 +1583,7 @@ async def update_check(
         package_id=installed_package_id,
       )
       pending, pending_state = await asyncio.to_thread(
-        _current_pending_update,
+        _read_pending_update, repo, target_app_id,
       )
       if manifest_url is not None and not _update_candidate_matches_installed(
         installed_manifest_url, manifest_url, candidate.manifest,
@@ -1734,6 +1742,10 @@ async def update_candidate_preview(
       previous_source = await asyncio.to_thread(
         install.read_recorded_update_source, repo, candidate.runtime_tree,
       )
+      # Same source-lock snapshot as the candidate, as update-check reports it.
+      _, pending_state = await asyncio.to_thread(
+        _read_pending_update, repo, app_id,
+      )
     except HTTPException:
       raise
     except install.PackageTooLarge as exc:
@@ -1765,6 +1777,7 @@ async def update_candidate_preview(
     upstream_commit=candidate.commit,
     upstream_diff=upstream_diff,
     source_digest=candidate.source_digest,
+    pending_update_state=pending_state or "none",
   )
 
 
@@ -2147,6 +2160,9 @@ async def apply_app_source(
       if stderr:
         detail["stderr"] = stderr
       raise HTTPException(status_code=422, detail=detail) from exc
+    except RolldownStalled as exc:
+      # Distinct from compile_failed: the source was not judged.
+      raise HTTPException(status_code=503, detail=exc.detail()) from exc
 
   async with fs_locks.install_uninstall_lock():
     matched = (
