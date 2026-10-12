@@ -181,6 +181,7 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
+import { createQueuedEditOrder } from './queuedEditOrder.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
@@ -941,7 +942,7 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
-  // ChatInputBar installs `{ open(cid), discard(cid) }` here so the queue
+  // ChatInputBar installs `{ open(cid), setAside(cid) }` here so the queue
   // tray's pencil and × reach the chat box; it reports which queued message
   // the box is editing for the tray's "In the chat box" tag.
   const queuedComposerRef = useRef(null)
@@ -3249,11 +3250,10 @@ export default function ChatView({
   // early tap waits on these exact requests rather than becoming an inert
   // click or briefly showing Stop.
   const queuedSendRequestsRef = useRef(new Map())
-  // A queued row's edit while its save is in flight, by cid. Cancelling or
-  // sending that row now waits for it, so the writes reach the outbox and the
-  // server in order: a late edit response hydrates server truth and would
-  // otherwise put a just-cancelled row back in the tray.
-  const queuedEditRequestsRef = useRef(new Map())
+  // Edits of a queued row run in order, and cancelling or sending that row now
+  // waits for them: a late edit response would otherwise put a just-cancelled
+  // row back in the tray or let Send now send the replaced text.
+  const [queuedEditOrder] = useState(createQueuedEditOrder)
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return false
@@ -4364,8 +4364,7 @@ export default function ChatView({
   // CID: full queue snapshots can arrive out of order when two rows are
   // cancelled quickly and would otherwise resurrect a sibling cancellation.
   const handleCancelPending = useCallback(async (cid) => {
-    const editWrite = queuedEditRequestsRef.current.get(cid)
-    if (editWrite) await Promise.allSettled([editWrite])
+    await queuedEditOrder.settled(cid)
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
@@ -4452,7 +4451,7 @@ export default function ChatView({
         setSendFailure('Cancellation couldn’t be confirmed. This message may still be queued in Möbius; reconnect to check.')
       }
     }
-  }, [chatId, pendingQueue, setSendFailure])
+  }, [chatId, pendingQueue, queuedEditOrder, setSendFailure])
 
   const handleRetryRejected = useCallback(async cid => {
     const result = await retryRejectedIntent(cid, { chatId, principalKey: outboxPrincipalKey(getToken()) })
@@ -4500,15 +4499,9 @@ export default function ChatView({
     }
   }, [chatId, pendingQueue])
 
-  const handleUpdatePending = useCallback(async (cid, content) => {
-    const edit = updateQueuedContent(cid, content)
-    queuedEditRequestsRef.current.set(cid, edit)
-    try {
-      return await edit
-    } finally {
-      if (queuedEditRequestsRef.current.get(cid) === edit) queuedEditRequestsRef.current.delete(cid)
-    }
-  }, [updateQueuedContent])
+  const handleUpdatePending = useCallback((cid, content) => (
+    queuedEditOrder.run(cid, () => updateQueuedContent(cid, content))
+  ), [queuedEditOrder, updateQueuedContent])
 
   async function handleStop() {
     // Re-entry guard. Without this, two rapid Stop clicks would both
@@ -5001,8 +4994,7 @@ export default function ChatView({
       const queueWrite = queuedSendRequestsRef.current.get(cid)
       if (queueWrite) await Promise.allSettled([queueWrite])
       // Send the row's saved edit, not the text that edit is replacing.
-      const editWrite = queuedEditRequestsRef.current.get(cid)
-      if (editWrite) await Promise.allSettled([editWrite])
+      await queuedEditOrder.settled(cid)
       const findRow = () => pendingQueue.getSteerCandidates().find(m => cidOf(m) === cid)
       let row = findRow()
       if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
@@ -6491,7 +6483,10 @@ export default function ChatView({
         <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
             onCancel={cid => {
-              queuedComposerRef.current?.discard(cid)
+              // The row leaves the tray at once, so the chat box returns to
+              // the draft now; the unsaved edit stays with the message, so a
+              // cancel that fails loses nothing and reopening shows it.
+              queuedComposerRef.current?.setAside(cid)
               void handleCancelPending(cid)
             }}
             onRetry={handleRetryRejected}

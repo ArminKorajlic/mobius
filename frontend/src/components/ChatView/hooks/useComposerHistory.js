@@ -104,7 +104,7 @@ export default function useComposerHistory({
    * box back to the draft rather than reporting it as started. The cancel can
    * still fail and leave the message queued, so the box's text stays with it
    * as an unsaved edit that reopening shows. */
-  const discard = useCallback((key) => {
+  const setAside = useCallback((key) => {
     if (browseRef.current.key !== key) return false
     return apply(setComposerEntryAside(
       browseRef.current, entriesRef.current, valueRef.current,
@@ -186,7 +186,7 @@ export default function useComposerHistory({
     move,
     open,
     escape,
-    discard,
+    setAside,
     noteEdit,
     submit,
   }

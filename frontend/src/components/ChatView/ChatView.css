@@ -2531,6 +2531,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  /* The visible well. The ::after below makes the tap target 44px. */
   width: 26px;
   height: 26px;
   padding: 0;

@@ -117,20 +117,19 @@ test('the modified-Enter submit uses one direct request and presents it inline',
   )
 })
 
-test('a queued row cancelled or sent now while its edit saves waits for that save', () => {
+test('ChatView routes queued edits, cancels, and Send now through one per-message order', () => {
+  // The ordering itself is tested behaviourally in
+  // hooks/__tests__/queuedEditOrder.test.js; this pins only the wiring.
   assert.match(
     source,
-    /const handleUpdatePending = useCallback\(async \(cid, content\) => \{\s*const edit = updateQueuedContent\(cid, content\)\s*queuedEditRequestsRef\.current\.set\(cid, edit\)[\s\S]*?finally \{\s*if \(queuedEditRequestsRef\.current\.get\(cid\) === edit\) queuedEditRequestsRef\.current\.delete\(cid\)/,
-    'each queued edit is tracked by cid until it settles',
+    /const handleUpdatePending = useCallback\(\(cid, content\) => \(\s*queuedEditOrder\.run\(cid, \(\) => updateQueuedContent\(cid, content\)\)/,
   )
   assert.match(
     source,
-    /const handleCancelPending = useCallback\(async \(cid\) => \{\s*const editWrite = queuedEditRequestsRef\.current\.get\(cid\)\s*if \(editWrite\) await Promise\.allSettled\(\[editWrite\]\)[\s\S]*?cancelLocalIntent\(cid/,
-    'a late edit response must not hydrate a just-cancelled row back into the tray',
+    /const handleCancelPending = useCallback\(async \(cid\) => \{\s*await queuedEditOrder\.settled\(cid\)/,
   )
   assert.match(
     source,
-    /async function handleSteerOne\(cid\) \{[\s\S]*?const editWrite = queuedEditRequestsRef\.current\.get\(cid\)\s*if \(editWrite\) await Promise\.allSettled\(\[editWrite\]\)[\s\S]*?const findRow/,
-    'Send now sends the saved edit, not the text it replaces',
+    /async function handleSteerOne\(cid\) \{[\s\S]*?await queuedEditOrder\.settled\(cid\)[\s\S]*?const findRow/,
   )
 })

@@ -124,8 +124,8 @@ test('a send that never happens leaves the recalled text and does not return lat
 test('cancelling the queued message being edited gives the box back to the draft', () => {
   const box = mountComposer({ value: 'Then deploy it' })
   box.current.open('q1')
-  assert.equal(box.current.discard('q2'), false, 'another row does not affect the box')
-  box.current.discard('q1')
+  assert.equal(box.current.setAside('q2'), false, 'another row does not affect the box')
+  box.current.setAside('q1')
   assert.equal(box.props.value, 'Then deploy it')
   assert.equal(box.current.browsing, false)
 })
@@ -134,7 +134,7 @@ test('a cancel that does not go through keeps the unsaved edit with its queued m
   const box = mountComposer({ value: 'Then deploy it' })
   box.current.open('q1')
   box.type('Then check the dark theme, edited')
-  box.current.discard('q1')
+  box.current.setAside('q1')
   assert.equal(box.props.value, 'Then deploy it', 'the draft comes back at once')
 
   // The queue still holds q1 (the cancel failed), so reopening finds the edit.

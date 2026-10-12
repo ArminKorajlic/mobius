@@ -326,7 +326,7 @@ export function PrimaryAction({
  *   queuedMessages     — visible queued rows; ↑ and the pencil open them here.
  *   onSaveQueued       — the queue's save, (cid, text) → outcome string.
  *   queuedComposerRef  — caller-owned ref. The bar installs
- *                        `{ open(cid), discard(cid) }` so the queue tray's
+ *                        `{ open(cid), setAside(cid) }` so the queue tray's
  *                        pencil and × reach the chat box.
  *   onQueuedInComposerChange — receives the cid of the queued message the
  *                        box is editing, or null, for the tray's tag.
@@ -518,7 +518,7 @@ export default function ChatInputBar({
     showValue: showComposerValue,
     saveQueued: onSaveQueued,
   })
-  const { open: openInComposer, discard: discardFromComposer } = composerHistory
+  const { open: openInComposer, setAside: setAsideFromComposer } = composerHistory
 
   // The queue tray is ChatView's sibling of this bar; its pencil and × reach
   // the box through this caller-owned ref, like attachTriggerRef above.
@@ -530,10 +530,10 @@ export default function ChatInputBar({
         // Focus inside the tap so iOS keeps (or raises) the soft keyboard.
         focusComposerElement(inputRef?.current)
       },
-      discard: discardFromComposer,
+      setAside: setAsideFromComposer,
     }
     return () => { queuedComposerRef.current = null }
-  }, [queuedComposerRef, openInComposer, discardFromComposer, inputRef])
+  }, [queuedComposerRef, openInComposer, setAsideFromComposer, inputRef])
 
   // The tray tags the row open here; a chat box that goes away takes its
   // tag with it.
