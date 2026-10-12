@@ -290,9 +290,11 @@ function selectedMarkdownPayload(root, selection, markdownForBlock) {
 
   const markdown = []
   const plain = []
+  let covered = ''
   for (const block of blocks) {
     const overlap = rangeInsideNode(range, block)
     if (!overlap) continue
+    covered += overlap.toString()
     const fragment = cloneRangeWithContext(overlap, block)
     const fullRange = block.ownerDocument.createRange()
     fullRange.selectNodeContents(block)
@@ -304,6 +306,13 @@ function selectedMarkdownPayload(root, selection, markdownForBlock) {
     if (plainPart) plain.push(plainPart)
   }
   if (markdown.length === 0 || plain.length === 0) return null
+  // A selection can include visible text that no Markdown block owns — an
+  // attachment name beside the prose, for instance. This surface serializes
+  // only its blocks, so overriding the clipboard would silently drop that
+  // text: keep the native copy instead. Whitespace differs between the DOM
+  // and the serialization, so compare the selected characters without it.
+  const bare = text => String(text || '').replace(/\s+/g, '')
+  if (bare(covered) !== bare(range.toString())) return null
   return { markdown: markdown.join('\n\n'), plainText: plain.join('\n\n') }
 }
 

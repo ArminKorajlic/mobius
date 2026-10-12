@@ -204,9 +204,12 @@ test('a formatting edit selects its text only after the native insert lands', ()
   }
 })
 
-function copySelectionFixture({ endsOutside }) {
+function copySelectionFixture({ endsOutside = false, startsInAttachment = false } = {}) {
   const inside = text('Hello')
   const outsideMessage = text('tail selected in the next message')
+  // An attachment name rendered beside the prose, inside the same copy
+  // surface but outside every Markdown block.
+  const attachmentName = text('report.pdf')
   const overlap = {
     collapsed: false,
     setStart: () => {},
@@ -228,16 +231,17 @@ function copySelectionFixture({ endsOutside }) {
   }
   overlap.commonAncestorContainer = block
   const range = {
-    startContainer: inside,
+    startContainer: startsInAttachment ? attachmentName : inside,
     endContainer: endsOutside ? outsideMessage : inside,
     startOffset: 0,
     endOffset: 5,
     intersectsNode: node => node === block,
+    toString: () => (startsInAttachment ? 'report.pdf Hello' : 'Hello'),
   }
   doc.getSelection = () => ({ rangeCount: 1, isCollapsed: false, getRangeAt: () => range })
   const root = {
     ownerDocument: doc,
-    contains: node => node === inside || node === block,
+    contains: node => node === inside || node === block || node === attachmentName,
     querySelectorAll: selector => (selector === '[data-markdown-block]' ? [block] : []),
   }
   const written = {}
@@ -263,6 +267,16 @@ test('a selection reaching into the next message keeps the native copy untruncat
   assert.equal(copyMarkdownSelection(event, () => '**Hello**'), false)
   assert.equal(event.defaultPrevented, false,
     'overriding here would truncate the visible selection to one message')
+  assert.deepEqual(written, {}, 'the native clipboard payload must stay untouched')
+})
+
+test('a selection that includes an attachment name keeps the native copy', () => {
+  // Both endpoints sit inside the surface, but the attachment text belongs to
+  // no Markdown block: serializing only the blocks would silently drop it.
+  const { event, written } = copySelectionFixture({ startsInAttachment: true })
+  assert.equal(copyMarkdownSelection(event, () => '**Hello**'), false)
+  assert.equal(event.defaultPrevented, false,
+    'the blocks alone cannot represent the attachment text the user selected')
   assert.deepEqual(written, {}, 'the native clipboard payload must stay untouched')
 })
 
