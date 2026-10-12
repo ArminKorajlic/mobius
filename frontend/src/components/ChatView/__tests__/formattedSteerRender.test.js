@@ -231,7 +231,8 @@ function copyWholeFragment(msg, visibleText) {
   const payload = new Map()
   const clipboardData = { setData: (type, value) => payload.set(type, value), getData: type => payload.get(type) || '' }
   let prevented = false
-  onCopy({ currentTarget: { ownerDocument, querySelectorAll: () => [block] }, clipboardData,
+  // The whole modeled selection lives inside this surface, like the real DOM.
+  onCopy({ currentTarget: { ownerDocument, querySelectorAll: () => [block], contains: node => node === block }, clipboardData,
     preventDefault: () => { prevented = true } })
   assert.equal(prevented, true)
   return { html, clipboardData }

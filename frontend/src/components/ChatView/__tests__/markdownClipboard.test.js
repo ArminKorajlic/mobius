@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   assistantClipboardText,
+  copyMarkdownSelection,
   insertClipboardText,
   markdownClipboardHtml,
   markdownFromFragment,
@@ -201,6 +202,68 @@ test('a formatting edit selects its text only after the native insert lands', ()
     runQueued()
     assert.deepEqual(events, accepted ? ['insert', 'select'] : ['insert', 'fallback'])
   }
+})
+
+function copySelectionFixture({ endsOutside }) {
+  const inside = text('Hello')
+  const outsideMessage = text('tail selected in the next message')
+  const overlap = {
+    collapsed: false,
+    setStart: () => {},
+    setEnd: () => {},
+    toString: () => 'Hello',
+    cloneContents: () => fragment([text('Hello')]),
+    commonAncestorContainer: null,
+  }
+  const doc = {
+    createRange: () => ({
+      selectNodeContents: () => {},
+      cloneRange: () => overlap,
+      toString: () => 'Hello',
+    }),
+  }
+  const block = {
+    ownerDocument: doc,
+    contains: node => node === inside,
+  }
+  overlap.commonAncestorContainer = block
+  const range = {
+    startContainer: inside,
+    endContainer: endsOutside ? outsideMessage : inside,
+    startOffset: 0,
+    endOffset: 5,
+    intersectsNode: node => node === block,
+  }
+  doc.getSelection = () => ({ rangeCount: 1, isCollapsed: false, getRangeAt: () => range })
+  const root = {
+    ownerDocument: doc,
+    contains: node => node === inside || node === block,
+    querySelectorAll: selector => (selector === '[data-markdown-block]' ? [block] : []),
+  }
+  const written = {}
+  const event = {
+    currentTarget: root,
+    clipboardData: { setData: (type, value) => { written[type] = value } },
+    defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true },
+  }
+  return { event, written }
+}
+
+test('a selection contained in one message copies its Markdown source', () => {
+  const { event, written } = copySelectionFixture({ endsOutside: false })
+  assert.equal(copyMarkdownSelection(event, () => '**Hello**'), true)
+  assert.equal(event.defaultPrevented, true)
+  assert.equal(written['text/markdown'], '**Hello**')
+  assert.equal(written['text/plain'], 'Hello')
+})
+
+test('a selection reaching into the next message keeps the native copy untruncated', () => {
+  const { event, written } = copySelectionFixture({ endsOutside: true })
+  assert.equal(copyMarkdownSelection(event, () => '**Hello**'), false)
+  assert.equal(event.defaultPrevented, false,
+    'overriding here would truncate the visible selection to one message')
+  assert.deepEqual(written, {}, 'the native clipboard payload must stay untouched')
 })
 
 test('chat prose and the composer share the Markdown clipboard boundary', () => {

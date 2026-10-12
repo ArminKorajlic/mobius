@@ -279,6 +279,11 @@ function cloneRangeWithContext(range, block) {
 function selectedMarkdownPayload(root, selection, markdownForBlock) {
   if (!root || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null
   const range = selection.getRangeAt(0)
+  // A selection that starts or ends outside this message keeps the native
+  // copy: this surface can only serialize its own blocks, so overriding the
+  // clipboard here would silently drop the other messages in the selection.
+  const within = node => node === root || root.contains(node)
+  if (!within(range.startContainer) || !within(range.endContainer)) return null
   const blocks = Array.from(root.querySelectorAll('[data-markdown-block]'))
     .filter(block => rangeIntersectsNode(range, block))
   if (blocks.length === 0) return null
