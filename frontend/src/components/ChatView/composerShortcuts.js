@@ -20,11 +20,10 @@ export function resolveComposerEnterAction(event, {
   return 'noop'
 }
 
-/** Whether an inline chat editor (the QA card's custom answer, the queued-
- * message editor) should treat this Enter as "send". Reuses the composer's own
- * decision so every inline editor sends on the same chord: plain Enter on
- * desktop, Shift+Enter always a newline, Enter a newline on touch, and
- * Cmd/Ctrl+Enter always sends. These editors have no queued-steer affordance,
+/** Whether an inline chat editor (such as the QA card's custom answer) should
+ * treat this Enter as "send". Reuses the composer's own decision so every
+ * inline editor sends on the same chord: plain Enter on desktop, Shift+Enter
+ * always a newline, Enter a newline on touch, and Cmd/Ctrl+Enter always sends. These editors have no queued-steer affordance,
  * so only a real submit counts. */
 export function isInlineEditorSubmit(event, { isTouchPrimary = false } = {}) {
   const action = resolveComposerEnterAction(event, { hasInput: true, isTouchPrimary })

@@ -185,6 +185,7 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
+import { createQueuedEditOrder } from './queuedEditOrder.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
@@ -714,7 +715,13 @@ export default function ChatView({
     handleComposerRemoveFile,
     restoreComposerText,
     restoreDurableDraft,
+    setDraftAside,
+    takeDraftBack,
   } = useComposerDraftState({ chatId, hidden, inputRef })
+  const composerDraftAside = useMemo(
+    () => ({ set: setDraftAside, take: takeDraftBack }),
+    [setDraftAside, takeDraftBack],
+  )
 
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
@@ -899,6 +906,11 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
+  // ChatInputBar installs `{ open(cid), setAside(cid) }` here so the queue
+  // tray's pencil and × reach the chat box; it reports which queued message
+  // the box is editing for the tray's "In the chat box" tag.
+  const queuedComposerRef = useRef(null)
+  const [queuedInComposerCid, setQueuedInComposerCid] = useState(null)
   // The model/effort picker can accept another choice before the prior save
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
@@ -3158,6 +3170,11 @@ export default function ChatView({
   // early tap waits on these exact requests rather than becoming an inert
   // click or briefly showing Stop.
   const queuedSendRequestsRef = useRef(new Map())
+  // Edits of a queued row run in order, and cancelling or sending that row now
+  // waits for them: a late edit response would otherwise put a just-cancelled
+  // row back in the tray or let Send now send the replaced text. Steer all
+  // and Stop read the whole queue only after every row's chain settles.
+  const [queuedEditOrder] = useState(createQueuedEditOrder)
 
   const doSend = useCallback(async (text, opts = {}) => {
     if (isProviderSwitchBlocking(chatId)) return false
@@ -3180,7 +3197,9 @@ export default function ChatView({
       : pendingFiles
           .filter(f => f.status === 'done')
           .map(f => ({ name: f.name, size: f.size, mime_type: f.mime_type }))
-    if (pendingFiles.some(c => c.status === 'uploading')) return false
+    // Only a send that takes the draft's files waits for their uploads; a
+    // history resend (attachments supplied, `[]`) goes without them.
+    if (usesComposerFiles && pendingFiles.some(c => c.status === 'uploading')) return false
     if (!hasSendablePayload(text, attachments)) return false
 
     const pin = opts.pin !== false  // default true
@@ -4224,7 +4243,14 @@ export default function ChatView({
     void sideQuestions.ask(question)
   }
 
-  function handleSubmit(e) {
+  // An earlier message sent again from history (`fromHistory`, ChatInputBar
+  // contract 8) goes without the composer's attached files: they belong to the
+  // draft set aside behind it, so they stay in the composer.
+  function composerSendFiles(fromHistory) {
+    return fromHistory ? { attachments: [] } : {}
+  }
+
+  function handleSubmit(e, { fromHistory = false } = {}) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
     // During an early reveal (a no-cache open presented before the runtime
@@ -4241,7 +4267,7 @@ export default function ChatView({
     }
     const composed = input.trim()
     if (dispatchMobiusChatCommand(composed)) return
-    doSend(composed)
+    doSend(composed, composerSendFiles(fromHistory))
   }
 
   async function handleProvisionalNewChatSubmit(e) {
@@ -4253,7 +4279,7 @@ export default function ChatView({
     onNewChatSubmit?.(input)
   }
 
-  function handleSubmitSteer(e) {
+  function handleSubmitSteer(e, { fromHistory = false } = {}) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
     if (needsModelSelection({ showPicker, chatInfo })) {
@@ -4264,7 +4290,7 @@ export default function ChatView({
     const composed = input.trim()
     if (dispatchMobiusChatCommand(composed)) return
     submitSteerInFlightRef.current = true
-    void doSend(input.trim(), { directSteer: true })
+    void doSend(input.trim(), { directSteer: true, ...composerSendFiles(fromHistory) })
       .finally(() => { submitSteerInFlightRef.current = false })
   }
 
@@ -4338,7 +4364,11 @@ export default function ChatView({
   // Cancel one queued message via DELETE. Keep reconciliation scoped to that
   // CID: full queue snapshots can arrive out of order when two rows are
   // cancelled quickly and would otherwise resurrect a sibling cancellation.
-  const handleCancelPending = useCallback(async (cid) => {
+  // One chain per message (queuedEditOrder): the cancellation waits out
+  // in-flight edits, whose late responses could otherwise put the row back,
+  // and an edit opened during a slow cancellation waits for its outcome
+  // instead of racing the DELETE.
+  const handleCancelPending = useCallback((cid) => queuedEditOrder.run(cid, async () => {
     const currentQueue = pendingQueue.pendingMessagesRef.current
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
@@ -4425,14 +4455,14 @@ export default function ChatView({
         setSendFailure('Cancellation couldn’t be confirmed. This message may still be queued in Möbius; reconnect to check.')
       }
     }
-  }, [chatId, pendingQueue, setSendFailure])
+  }), [chatId, pendingQueue, queuedEditOrder, setSendFailure])
 
   const handleRetryRejected = useCallback(async cid => {
     const result = await retryRejectedIntent(cid, { chatId, principalKey: outboxPrincipalKey(getToken()) })
     if (result.status !== 'queued') setSendFailure('Couldn’t retry yet. Your message is still kept on this device.')
   }, [chatId, setSendFailure])
 
-  const handleUpdatePending = useCallback(async (cid, content) => {
+  const updateQueuedContent = useCallback(async (cid, content) => {
     const local = await editLocalIntent(cid, {
       chatId, principalKey: outboxPrincipalKey(getToken()), content,
     })
@@ -4473,6 +4503,10 @@ export default function ChatView({
     }
   }, [chatId, pendingQueue])
 
+  const handleUpdatePending = useCallback((cid, content) => (
+    queuedEditOrder.run(cid, () => updateQueuedContent(cid, content))
+  ), [queuedEditOrder, updateQueuedContent])
+
   async function handleStop() {
     // Re-entry guard. Without this, two rapid Stop clicks would both
     // snapshot the same pending queue (the snapshot happens BEFORE
@@ -4493,6 +4527,13 @@ export default function ChatView({
           new Promise(resolve => setTimeout(resolve, 4000)),
         ])
       }
+      // Queued edits, cancels, and Send nows still saving decide what the
+      // resend holds; wait for them with the same bound, so a hung save
+      // cannot wedge Stop.
+      await Promise.race([
+        queuedEditOrder.settled(),
+        new Promise(resolve => setTimeout(resolve, 4000)),
+      ])
       // Snapshot the queue before doing anything destructive. Stop ALWAYS
       // interrupts the current turn and resends any queued messages as ONE
       // fresh follow-up turn — it never folds them into the still-running
@@ -4916,6 +4957,9 @@ export default function ChatView({
       // confirms/removes each row before this continuation reads the queue.
       const queueWrites = [...queuedSendRequestsRef.current.values()]
       if (queueWrites.length > 0) await Promise.allSettled(queueWrites)
+      // Steer the saved text of every row, never the text an edit in flight
+      // is replacing.
+      await queuedEditOrder.settled()
       const snapshot = pendingQueue.getSteerCandidates()
       // Only server-confirmed entries can be force-steered: the backend
       // reconstructs the durable rows from chat.pending_messages, so an
@@ -4962,14 +5006,19 @@ export default function ChatView({
     try {
       const queueWrite = queuedSendRequestsRef.current.get(cid)
       if (queueWrite) await Promise.allSettled([queueWrite])
-      const findRow = () => pendingQueue.getSteerCandidates().find(m => cidOf(m) === cid)
-      let row = findRow()
-      if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
-        await reconcileRuntimeState()
-        row = findRow()
-      }
-      if (!row || !(typeof row.ts === 'number' && row.serverTs === true)) return
-      await steerRows([row])
+      // Send the row's saved edit, not the text that edit is replacing: run on
+      // the row's chain, so earlier edits settle first and an edit opened
+      // during a slow send waits for this steer instead of racing it.
+      await queuedEditOrder.run(cid, async () => {
+        const findRow = () => pendingQueue.getSteerCandidates().find(m => cidOf(m) === cid)
+        let row = findRow()
+        if (row && !(typeof row.ts === 'number' && row.serverTs === true)) {
+          await reconcileRuntimeState()
+          row = findRow()
+        }
+        if (!row || !(typeof row.ts === 'number' && row.serverTs === true)) return
+        await steerRows([row])
+      })
     } finally {
       handlingSteerRef.current = false
       setSteerBusy(false)
@@ -6473,16 +6522,22 @@ export default function ChatView({
         />
         <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
-            onCancel={handleCancelPending}
+            onCancel={cid => {
+              // The row leaves the tray at once, so the chat box returns to
+              // the draft now; the unsaved edit stays with the message, so a
+              // cancel that fails loses nothing and reopening shows it.
+              queuedComposerRef.current?.setAside(cid)
+              void handleCancelPending(cid)
+            }}
             onRetry={handleRetryRejected}
-            onEdit={handleUpdatePending}
+            onEditInComposer={cid => queuedComposerRef.current?.open(cid)}
+            inComposerCid={queuedInComposerCid}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}
             steerBusy={steerBusy}
             turnActive={turnActive}
             online={online}
             restarting={restartPending}
-            focusComposer={() => focusComposerElement(inputRef.current)}
           />
         <CompactionProgress
           progress={compactionProgress}
@@ -6535,6 +6590,11 @@ export default function ChatView({
           onRemoveFile={handleComposerRemoveFile}
           attachTriggerRef={attachTriggerRef}
           messageHistory={messageHistory}
+          queuedMessages={pendingQueue.visiblePendingMessages}
+          onSaveQueued={handleUpdatePending}
+          draftAside={composerDraftAside}
+          queuedComposerRef={queuedComposerRef}
+          onQueuedInComposerChange={setQueuedInComposerCid}
           provider={chatInfo?.provider}
           projectRef={chatInfo?.project || null}
           leftButtons={
