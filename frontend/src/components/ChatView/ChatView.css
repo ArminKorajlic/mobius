@@ -213,7 +213,7 @@
 /* A reply is one conversation item; source rows keep their anchors and
    compact block spacing without cancelling the surrounding conversation gap. */
 .chat__reply-rows { list-style: none; padding: 0; margin: 0; }
-.chat__reply-rows > .chat__msg + .chat__msg:not(:has(> .chat__assistant-copy-surface:empty)) {
+.chat__reply-rows > .chat__msg + .chat__msg:not(:has(> .chat__markdown-copy-surface:empty)) {
   margin-top: 8px;
 }
 
@@ -402,7 +402,7 @@
 
 /* Event-only owner for Markdown-aware native selection copy. `contents` keeps
    every prose/tool child in the message row's existing flex and gap geometry. */
-.chat__assistant-copy-surface { display: contents; }
+.chat__markdown-copy-surface { display: contents; }
 
 /* A search jump is a one-shot held position, not a new scrolling mode. The
    restrained row wash and text highlight make the destination legible without
@@ -612,6 +612,20 @@
   border-radius: 18px 18px 5px 18px;
   max-width: min(85%, 75ch);
   white-space: pre-wrap;
+}
+
+/* Markdown in your own bubble (colours live in index.css). The bubble already
+   pads its text, so the reply column's prose gutters drop away, and blocks sit
+   a little closer than in a reply. pre-wrap stays with plain bubble text;
+   code blocks keep their own white-space. */
+.chat__text--user .md-blocks {
+  gap: 0.5rem;
+  white-space: normal;
+}
+
+.chat__text--user :is(.md-paragraph, .md-heading) {
+  padding-left: 0;
+  padding-right: 0;
 }
 
 /* Boundary between owner messages delivered together in one bubble: a
@@ -4849,8 +4863,8 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 
 /* Only the outer transcript owns the 24px conversation gap being cancelled.
    Nested reply rows already own their compact spacing; never pull them upward. */
-.chat__list > .chat__msg:has(> .chat__tools:last-child, > .chat__assistant-copy-surface > .chat__tools:last-child)
-  + .chat__msg:has(> .chat__tools:first-child, > .chat__assistant-copy-surface > .chat__tools:first-child) {
+.chat__list > .chat__msg:has(> .chat__tools:last-child, > .chat__markdown-copy-surface > .chat__tools:last-child)
+  + .chat__msg:has(> .chat__tools:first-child, > .chat__markdown-copy-surface > .chat__tools:first-child) {
   margin-block-start: calc(var(--activity-row-gap, 4px) - 24px);
 }
 .chat__msg--peer .chat__tools { width: 100%; }
