@@ -11,6 +11,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app import models, providers, transcript_rows
 from app.chat_start import start_programmatic_chat_turn
@@ -31,6 +32,9 @@ from app.delegations import (
   ensure_delegation_started,
   normalize_cwd,
   parent_root_run_id,
+  delegation_source_work_id,
+  _parent_wake_continuation_root,
+  parent_wake_blocker,
   publish_parent_waiting_changed,
   record_result_read_by_parent,
   retry_limit_park,
@@ -364,8 +368,9 @@ async def delegation_capabilities(
     return value if isinstance(value, dict) else {}
 
   connections = {}
-  for provider_id, provider in providers.PROVIDERS.items():
-    error = provider.check_auth(get_settings().data_dir)
+  # check_auth may be a broker round trip (Möbius); keep it off the loop.
+  for provider_id, provider in list(providers.PROVIDERS.items()):
+    error = await run_in_threadpool(provider.check_auth, get_settings().data_dir)
     connections[provider_id] = {
       "configured": error is None,
       "authenticated": error is None,
@@ -459,9 +464,10 @@ def read_delegation_result(
       status_code=403, detail="Only the helper's parent chat may read its result.",
     )
   payload = serialize_delegation(db, row)
+  # A settled outcome is received even without report text (a failure that
+  # wrote nothing); a truncated report and still-working helpers stay owed.
   if (
-    payload.get("result")
-    and not payload.get("result_truncated")
+    not payload.get("result_truncated")
     and record_result_read_by_parent(db, row)
   ):
     db.commit()
@@ -604,8 +610,18 @@ async def message_delegation(
         detail="The helper could not resume with this answer now; retry shortly.",
       )
 
-  async with chat_queue.get_transition_lock(row.child_chat_id):
+  goal_id = delegation_goal_id(db, row)
+  goal_owner = db.query(models.ChatGoal.chat_id).filter(
+    models.ChatGoal.id == goal_id,
+  ).scalar() if goal_id is not None else None
+  # Goal settlement and parent Stop must not overtake accepted child work.
+  # Nested helpers share the coordinator's Goal, so lock ancestors first.
+  async with AsyncExitStack() as admission:
+    for chat_id in dict.fromkeys((goal_owner, row.parent_chat_id, row.child_chat_id)):
+      if chat_id is not None:
+        await admission.enter_async_context(chat_queue.get_transition_lock(chat_id))
     db.rollback()
+    db.expire_all()
     row = _row_for_principal(db, delegation_id, principal)
     _require_guest_child_lineage(row, principal)
     status, run, _ = derived_status(db, row, load_result=False)
@@ -693,6 +709,23 @@ async def message_delegation(
             "with its peer chat id from list_agent_peers."
           ),
         )
+      source_work_id = delegation_source_work_id(row)
+      source_root = _parent_wake_continuation_root(db, row.parent_chat_id, source_work_id)
+      blocker, _ = parent_wake_blocker(
+        db, row.parent_chat_id, source_work_id, source_root,
+      )
+      if blocker is not None or source_root is None:
+        raise HTTPException(status_code=409, detail={
+          "code": "followup_owner_unavailable",
+          "reason": blocker or "source_missing",
+          "message": (
+            "This helper's original work can no longer own a follow-up result. "
+            "Nothing was started. For new work, use spawn_agent to start a fresh "
+            "helper under the current task or Goal; the old helper and its "
+            "history stay unchanged. If the original work is on hold, resume "
+            "that work only when the owner asks before messaging this helper."
+          ),
+        })
       row.notify_parent_on_complete = True
       db.commit()
       started = await start_programmatic_chat_turn(
