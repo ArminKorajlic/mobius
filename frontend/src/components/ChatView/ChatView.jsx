@@ -4125,6 +4125,11 @@ export default function ChatView({
     chatId, provisionalNewChat, hidden, serverCompactingKind,
     activationSettledRef, inputValueRef, setComposerInput, setSendFailure, fetchMessages,
     stopTurn: handleStop,
+    // /context measures the parts on demand with a short-lived cache; a
+    // completed compaction makes that snapshot wrong, so drop it.
+    onCompacted: compactedChatId => queryClient.invalidateQueries({
+      queryKey: chatQueries.keys.contextSizes(compactedChatId),
+    }),
   })
 
   const sideQuestions = useSideQuestion({
