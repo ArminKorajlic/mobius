@@ -89,8 +89,11 @@ import {
   resolveComposerHistoryMove,
 } from './composerHistory.js'
 import {
+  composerFormattingMarker,
   isPlainTextPasteShortcut,
+  linkPasteText,
   resolveComposerEnterAction,
+  wrapComposerSelection,
 } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import ComposerMicIcon from './ComposerMicIcon.jsx'
@@ -474,7 +477,7 @@ export default function ChatInputBar({
     const pending = pendingComposerCaretRef.current
     const textarea = inputRef?.current
     if (!pending || pending.value !== input || !textarea) return
-    try { textarea.setSelectionRange(pending.caret, pending.caret) } catch {}
+    try { textarea.setSelectionRange(pending.anchor ?? pending.caret, pending.caret) } catch {}
     pendingComposerCaretRef.current = null
   }, [input, inputRef])
 
@@ -544,16 +547,22 @@ export default function ChatInputBar({
       return
     }
 
-    const pastedText = assistantClipboardText(
+    const textarea = e.currentTarget
+    const selectionStart = textarea.selectionStart
+    const selectionEnd = textarea.selectionEnd
+    // A web address pasted over selected text links that text; the plain-text
+    // chord (Cmd/Ctrl+Shift+V) always pastes exactly what was copied.
+    const linkText = preferPlainText ? null : linkPasteText(
+      textarea.value.slice(selectionStart, selectionEnd),
+      e.clipboardData?.getData?.('text/plain'),
+    )
+    const pastedText = linkText ?? assistantClipboardText(
       e.clipboardData,
       preferPlainText,
     )
     if (pastedText === null) return
 
     e.preventDefault()
-    const textarea = e.currentTarget
-    const selectionStart = textarea.selectionStart
-    const selectionEnd = textarea.selectionEnd
     const pasteEvent = e.nativeEvent
     const applyControlledFallback = () => {
       // Some embedded browsers reject the native editing command. Keep the
@@ -572,6 +581,34 @@ export default function ChatInputBar({
     }
 
     if (queueClipboardTextUndoably(textarea, pastedText, applyControlledFallback)) return
+    applyControlledFallback()
+  }
+
+  // Cmd/Ctrl+B, I and E wrap the selection through the same undo-safe edit as
+  // paste, then select the wrapped text (or its placeholder) to type over.
+  function applyComposerFormatting(textarea, marker) {
+    const edit = wrapComposerSelection(
+      textarea.value,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      marker,
+    )
+    const selectWrappedText = () => {
+      try { textarea.setSelectionRange(edit.selectionStart, edit.selectionEnd) } catch {}
+    }
+    const applyControlledFallback = () => {
+      resetMessageHistory()
+      pendingComposerCaretRef.current = {
+        value: edit.value,
+        anchor: edit.selectionStart,
+        caret: edit.selectionEnd,
+      }
+      if (listeningRef?.current) onManualVoiceEdit?.(edit.value)
+      onInputChange(edit.value)
+    }
+    if (queueClipboardTextUndoably(
+      textarea, edit.text, applyControlledFallback, selectWrappedText,
+    )) return
     applyControlledFallback()
   }
 
@@ -646,6 +683,13 @@ export default function ChatInputBar({
         } catch {}
         pendingComposerCaretRef.current = null
       }
+    }
+
+    const formattingMarker = composerFormattingMarker(e)
+    if (formattingMarker) {
+      e.preventDefault()
+      applyComposerFormatting(e.currentTarget, formattingMarker)
+      return
     }
 
     const historyMove = resolveComposerHistoryMove(e, {
