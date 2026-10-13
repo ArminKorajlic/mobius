@@ -64,16 +64,29 @@ export function composerFormattingMarker(event) {
  * With nothing selected it inserts a placeholder, and the returned selection
  * covers the placeholder (or the wrapped text) so typing replaces it.
  * Whitespace at the selection's edges stays outside the markers, because
- * `** bold **` is not bold. Code keeps any backticks it contains intact
- * (see `codeDelimiters`). */
+ * `** bold **` is not bold — except inside a fenced block, where the first
+ * line's indentation is part of the code. Code keeps any backticks it
+ * contains intact (see `codeDelimiters`). */
 export function wrapComposerSelection(value, start, end, marker) {
   const current = String(value || '')
   const from = Math.max(0, Math.min(start ?? current.length, current.length))
   const to = Math.max(from, Math.min(end ?? from, current.length))
   const selected = current.slice(from, to)
-  const lead = selected.match(/^\s*/)[0]
-  const trail = selected.slice(lead.length).match(/\s*$/)[0]
-  const inner = selected.slice(lead.length, selected.length - trail.length) || FORMATTING_PLACEHOLDER
+  let lead = selected.match(/^\s*/)[0]
+  let trail = selected.slice(lead.length).match(/\s*$/)[0]
+  let inner = selected.slice(lead.length, selected.length - trail.length) || FORMATTING_PLACEHOLDER
+  if (marker === '`' && inner.includes('\n')) {
+    // A fenced block's first-line indentation is content: hoisting it before
+    // the fence would change whitespace-significant code (`  if x:` above a
+    // shallower line). Edge whitespace on the selected lines stays inside the
+    // fence; only whole blank lines stay outside it.
+    const keepLead = lead.slice(lead.lastIndexOf('\n') + 1)
+    const trailNewline = trail.indexOf('\n')
+    const keepTrail = trailNewline === -1 ? trail : trail.slice(0, trailNewline)
+    inner = `${keepLead}${inner}${keepTrail}`
+    lead = lead.slice(0, lead.length - keepLead.length)
+    trail = trail.slice(keepTrail.length)
+  }
   const { open, close } = marker === '`'
     ? codeDelimiters(inner, `${current.slice(0, from)}${lead}`, `${trail}${current.slice(to)}`)
     : { open: marker, close: marker }

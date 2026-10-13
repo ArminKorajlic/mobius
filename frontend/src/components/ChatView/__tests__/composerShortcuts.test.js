@@ -235,6 +235,18 @@ test('code across several lines becomes a fenced block on its own lines', () => 
   assert.equal(wrapComposerSelection('a\nb', 0, 3, '`').value, '```\na\nb\n```')
 })
 
+test('an indented multiline code selection keeps its indentation inside the fence', () => {
+  // Hoisting `    if x:`'s spaces before the fence would change
+  // whitespace-significant code relative to its shallower lines.
+  const value = '    if x:\n        run()'
+  const edit = wrapComposerSelection(value, 0, value.length, '`')
+  assert.equal(edit.value, '```\n    if x:\n        run()\n```')
+  assert.equal(edit.value.slice(edit.selectionStart, edit.selectionEnd), value)
+  // Whole blank lines around the code still stay outside the fence.
+  const padded = wrapComposerSelection('\n  a\nb\n\n', 0, 8, '`')
+  assert.equal(padded.value, '\n```\n  a\nb\n```\n\n')
+})
+
 test('code formatting keeps backticks inside the selection in one code span', () => {
   const md = new Marked()
   for (const selected of ['run `npm test` now', '`x`', 'a ``b`` c']) {
