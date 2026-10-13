@@ -64,6 +64,15 @@ RUN useradd -m -s /bin/bash mobius
 # Chrome stays for extensions and other full-browser features. The directory
 # deliberately lacks agent-browser's `chrome-` prefix so its own installed-
 # Chrome discovery never selects the shell implicitly.
+# Trust decision: neither Chrome download is integrity-checked. Pinning
+# AGENT_BROWSER_VERSION does not pin Chrome: `agent-browser install` resolves
+# the current Stable from Chrome for Testing's last-known-good feed on every
+# build, and Chrome for Testing publishes no independent checksums. Both
+# browsers therefore trust TLS to storage.googleapis.com, the same as the full
+# Chrome download already did. The `--version | grep` below only confirms that
+# the right archive was unpacked; it is not an integrity check, because a
+# tampered binary could print any version. Pinning a version and sha256 for
+# both browsers, like tectonic below, is tracked in mobius-os/mobius#1849.
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
 ARG CODEX_VERSION=0.159.0
