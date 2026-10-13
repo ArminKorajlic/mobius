@@ -93,7 +93,7 @@ import {
   composerHistoryProbeReachedBoundary,
 } from './composerHistory.js'
 import useComposerHistory from './hooks/useComposerHistory.js'
-import ComposerHistoryStrip from './ComposerHistoryStrip.jsx'
+import ComposerHistoryStrip, { composerHistoryKeyHint } from './ComposerHistoryStrip.jsx'
 import {
   isPlainTextPasteShortcut,
   resolveComposerEnterAction,
@@ -327,6 +327,8 @@ export function PrimaryAction({
  *                        oldest first (composerHistoryFromMessages).
  *   queuedMessages     — visible queued rows; ↑ and the pencil open them here.
  *   onSaveQueued       — the queue's save, (cid, text) → outcome string.
+ *   draftAside         — { set, take }: keeps the draft stored while history
+ *                        shows another message, and hands it back.
  *   queuedComposerRef  — caller-owned ref. The bar installs
  *                        `{ open(cid), setAside(cid) }` so the queue tray's
  *                        pencil and × reach the chat box.
@@ -373,6 +375,7 @@ export default function ChatInputBar({
   messageHistory = [],
   queuedMessages = [],
   onSaveQueued,
+  draftAside,
   queuedComposerRef,
   onQueuedInComposerChange,
   provider,
@@ -519,6 +522,7 @@ export default function ChatInputBar({
     queuedMessages,
     showValue: showComposerValue,
     saveQueued: onSaveQueued,
+    draftAside,
   })
   const { open: openInComposer, setAside: setAsideFromComposer } = composerHistory
 
@@ -791,6 +795,13 @@ export default function ChatInputBar({
   }
 
   const hasFiles = !!pendingFiles?.length
+  const touchPrimary = isTouchPrimary()
+  const historyKeyHint = composerHistoryKeyHint({
+    browsing: composerHistory.browsing,
+    hasEntries: composerHistory.hasEntries,
+    touch: touchPrimary,
+  })
+  const historyKeyHintId = `composer-history-keys-${chatId}`
 
   return (
     <form className="chat__form" onSubmit={handleSubmit}>
@@ -845,7 +856,7 @@ export default function ChatInputBar({
         note={composerHistory.note}
         saving={composerHistory.saving}
         draftFileCount={pendingFiles?.length || 0}
-        touch={isTouchPrimary()}
+        touch={touchPrimary}
         onBack={composerHistory.escape}
       />
       <div className="chat__input-row">
@@ -874,6 +885,7 @@ export default function ChatInputBar({
               onBlur={() => setSlashInputFocused(false)}
               placeholder="Message Möbius…"
               aria-label="Message Möbius…"
+              aria-describedby={historyKeyHint ? historyKeyHintId : undefined}
               name="message"
               autoComplete="off"
               rows={1}
@@ -888,6 +900,9 @@ export default function ChatInputBar({
                 'aria-autocomplete': 'list',
               } : {})}
             />
+            {historyKeyHint && (
+              <span id={historyKeyHintId} className="chat__sr-only">{historyKeyHint}</span>
+            )}
             {rightButtons}
             <PrimaryAction
               sending={sending}

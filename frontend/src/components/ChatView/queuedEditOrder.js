@@ -9,7 +9,8 @@
  * its Send now — runs through the same per-message chain, one after another.
  * A terminal action waits out the edits before it, and an edit opened during
  * a slow cancellation or Send now waits for that outcome instead of racing
- * it. Messages never wait for each other.
+ * it. Messages never wait for each other. Actions on the whole queue (Steer
+ * all, Stop) wait for every message's chain through `settled`.
  */
 export function createQueuedEditOrder() {
   // cid -> a promise that settles once every operation started so far settled.
@@ -26,6 +27,11 @@ export function createQueuedEditOrder() {
         if (tails.get(cid) === tail) tails.delete(cid)
       })
       return result
+    },
+    /** Settles (never rejects) once every operation started so far on any
+     * message has settled, so a whole-queue action reads saved text. */
+    settled() {
+      return Promise.all([...tails.values()]).then(() => {})
     },
   }
 }

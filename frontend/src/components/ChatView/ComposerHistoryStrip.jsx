@@ -42,6 +42,16 @@ export function composerHistoryStripCopy(position, { touch = false, saving = fal
   }
 }
 
+/** The chat box's screen-reader description of the history keys: the strip
+ * only appears once browsing has started, so this is how ↑ is discovered.
+ * Null without a keyboard-first input or anything to browse. */
+export function composerHistoryKeyHint({ browsing = false, hasEntries = false, touch = false } = {}) {
+  if (touch) return null
+  if (browsing) return 'Up and Down arrows move between messages. Escape returns to your draft.'
+  if (hasEntries) return 'Up arrow opens your queued and earlier messages.'
+  return null
+}
+
 export default function ComposerHistoryStrip({
   position, note, saving, touch, draftFileCount = 0, onBack,
 }) {

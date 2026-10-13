@@ -34,6 +34,10 @@ export const QUEUED_SAVE_NOTES = Object.freeze({
  * @param {(cid: string, text: string) => Promise<string>} options.saveQueued
  *        the queue's save; resolves to 'saved', 'gone', 'confirming',
  *        'waiting', 'context_pending', or 'error'
+ * @param {{ set: (draft: string) => void, take: () => (string|null) }} [options.draftAside]
+ *        the draft's durable owner: `set` keeps the set-aside draft as the
+ *        stored draft while the box shows other messages, and `take` hands
+ *        it back (as edited elsewhere meanwhile) when browsing ends
  */
 export default function useComposerHistory({
   chatId,
@@ -42,6 +46,7 @@ export default function useComposerHistory({
   queuedMessages,
   showValue,
   saveQueued,
+  draftAside,
 }) {
   const entries = useMemo(
     () => composerHistoryEntries(sentHistory || [], composerQueuedEntries(queuedMessages)),
@@ -59,6 +64,8 @@ export default function useComposerHistory({
   showValueRef.current = showValue
   const saveQueuedRef = useRef(saveQueued)
   saveQueuedRef.current = saveQueued
+  const draftAsideRef = useRef(draftAside)
+  draftAsideRef.current = draftAside
   // Armed by a send from history with the chat that armed it; the composer
   // clearing after that send is what brings the draft back, in that chat
   // only — a refused send can leave this armed, and the next chat's empty box
@@ -74,13 +81,25 @@ export default function useComposerHistory({
   const apply = useCallback((transition, extra = null) => {
     if (!transition) return false
     draftReturnRef.current = null
-    commit({ ...transition.state, ...(extra || {}), note: null, saving: false })
-    showValueRef.current?.(transition.value)
+    const wasBrowsing = browseRef.current.key != null
+    const next = { ...transition.state, ...(extra || {}), note: null, saving: false }
+    let value = transition.value
+    // Hand the draft to its durable owner before the box changes, so the
+    // browsed text is never stored as the draft, and take it back on return.
+    if (!wasBrowsing && next.key != null) {
+      draftAsideRef.current?.set(next.draft)
+    } else if (wasBrowsing && next.key == null) {
+      const kept = draftAsideRef.current?.take()
+      if (kept != null) value = kept
+    }
+    commit(next)
+    showValueRef.current?.(value)
     return true
   }, [commit])
 
   useEffect(() => {
     draftReturnRef.current = null
+    if (browseRef.current.key != null) draftAsideRef.current?.take()
     commit(COMPOSER_DRAFT_STATE)
   }, [chatId, commit])
 

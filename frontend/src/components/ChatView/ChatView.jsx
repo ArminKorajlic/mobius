@@ -709,7 +709,13 @@ export default function ChatView({
     handleComposerRemoveFile,
     restoreComposerText,
     restoreDurableDraft,
+    setDraftAside,
+    takeDraftBack,
   } = useComposerDraftState({ chatId, hidden, inputRef })
+  const composerDraftAside = useMemo(
+    () => ({ set: setDraftAside, take: takeDraftBack }),
+    [setDraftAside, takeDraftBack],
+  )
 
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
@@ -3257,7 +3263,8 @@ export default function ChatView({
   const queuedSendRequestsRef = useRef(new Map())
   // Edits of a queued row run in order, and cancelling or sending that row now
   // waits for them: a late edit response would otherwise put a just-cancelled
-  // row back in the tray or let Send now send the replaced text.
+  // row back in the tray or let Send now send the replaced text. Steer all
+  // and Stop read the whole queue only after every row's chain settles.
   const [queuedEditOrder] = useState(createQueuedEditOrder)
 
   const doSend = useCallback(async (text, opts = {}) => {
@@ -4533,6 +4540,13 @@ export default function ChatView({
           new Promise(resolve => setTimeout(resolve, 4000)),
         ])
       }
+      // Queued edits, cancels, and Send nows still saving decide what the
+      // resend holds; wait for them with the same bound, so a hung save
+      // cannot wedge Stop.
+      await Promise.race([
+        queuedEditOrder.settled(),
+        new Promise(resolve => setTimeout(resolve, 4000)),
+      ])
       // Snapshot the queue before doing anything destructive. Stop ALWAYS
       // interrupts the current turn and resends any queued messages as ONE
       // fresh follow-up turn — it never folds them into the still-running
@@ -4957,6 +4971,9 @@ export default function ChatView({
       // confirms/removes each row before this continuation reads the queue.
       const queueWrites = [...queuedSendRequestsRef.current.values()]
       if (queueWrites.length > 0) await Promise.allSettled(queueWrites)
+      // Steer the saved text of every row, never the text an edit in flight
+      // is replacing.
+      await queuedEditOrder.settled()
       const snapshot = pendingQueue.getSteerCandidates()
       // Only server-confirmed entries can be force-steered: the backend
       // reconstructs the durable rows from chat.pending_messages, so an
@@ -6579,6 +6596,7 @@ export default function ChatView({
           messageHistory={messageHistory}
           queuedMessages={pendingQueue.visiblePendingMessages}
           onSaveQueued={handleUpdatePending}
+          draftAside={composerDraftAside}
           queuedComposerRef={queuedComposerRef}
           onQueuedInComposerChange={setQueuedInComposerCid}
           provider={chatInfo?.provider}

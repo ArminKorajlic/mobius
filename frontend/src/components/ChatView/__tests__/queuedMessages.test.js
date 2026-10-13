@@ -13,7 +13,7 @@ const vite = await createServer({ appType: 'custom', logLevel: 'error',
 after(() => vite.close())
 const { default: QueuedMessages } = await vite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx')
 const { PrimaryAction } = await vite.ssrLoadModule('/src/components/ChatView/ChatInputBar.jsx')
-const { composerDraftPreview } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
+const { composerDraftPreview, composerHistoryKeyHint } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
 
 const items = [
   { cid: 'q1', content: 'Then check the dark theme' },
@@ -76,4 +76,11 @@ test('the strip counts the draft\'s files, which stay with the draft', () => {
   assert.equal(composerDraftPreview('Then deploy it', 2), 'Then deploy it · 2 files')
   assert.equal(composerDraftPreview('', 1), '1 file')
   assert.equal(composerDraftPreview('Then deploy it'), 'Then deploy it')
+})
+
+test('screen readers learn that ↑ browses history, and how to move and leave once browsing', () => {
+  assert.match(composerHistoryKeyHint({ hasEntries: true }), /Up arrow opens/)
+  assert.match(composerHistoryKeyHint({ hasEntries: true, browsing: true }), /Up and Down[\s\S]*Escape returns to your draft/)
+  assert.equal(composerHistoryKeyHint({ hasEntries: false }), null, 'nothing to browse, nothing to announce')
+  assert.equal(composerHistoryKeyHint({ hasEntries: true, touch: true }), null, 'touch input has no arrow keys')
 })

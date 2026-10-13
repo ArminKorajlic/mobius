@@ -152,3 +152,31 @@ test('a failed edit still releases its message, and other messages never wait', 
   await turn()
   assert.equal(ready, true, 'nothing is left waiting once the failed edit settles')
 })
+
+test('Steer all and Stop read the queue only after every row’s edit has saved', async () => {
+  const order = createQueuedEditOrder()
+  const { queue, respond } = queueWithEditInFlight(order)
+  const otherSave = deferred()
+  order.run('q2', () => otherSave.promise)
+  let settled = false
+  const wholeQueue = order.settled().then(() => { settled = true })
+
+  await turn()
+  assert.equal(settled, false, 'an edit in flight holds the whole-queue action')
+  respond([{ ...ROW, content: EDITED }])
+  await turn()
+  assert.equal(settled, false, 'every row’s chain must settle, not just one')
+  otherSave.reject(new Error('save failed'))
+  await wholeQueue
+  assert.equal(queue.current.pendingMessagesRef.current[0].content, EDITED,
+    'the snapshot sees the saved text, not the text the edit replaced')
+})
+
+test('a whole-queue action never waits when nothing is saving', async () => {
+  const order = createQueuedEditOrder()
+  await order.run('q1', async () => 'saved')
+  let settled = false
+  order.settled().then(() => { settled = true })
+  await turn()
+  assert.equal(settled, true)
+})
