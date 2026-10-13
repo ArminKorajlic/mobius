@@ -13,10 +13,8 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models, schemas
-from app.continuations import (
-  continuation_actor_label,
-  is_continuation_message,
-)
+from app.continuations import not_owner_speech_label
+from app.prompt_blocks import as_block_data
 from app.goal_commands import (
   goal_argument as _goal_argument,
   goal_clear_requested as _goal_clear_requested,
@@ -94,14 +92,14 @@ def _last_user_message_elapsed(db, chat_id: str) -> str | None:
     for index, m in transcript_rows.reverse_iter(db, chat):
       if index == size - 1:  # skip the current (just-committed) message
         continue
-      # Only owner-authored USER messages count. Product-owned automatic
-      # continuation rows retain role=user for provider history but must not
-      # reset the owner's recency clock.
+      # Only owner-authored USER messages count. Product-written rows
+      # (continuations, kept side questions) retain role=user for provider
+      # history but must not reset the owner's recency clock.
       if (
         not isinstance(m, dict)
         or m.get("role") != "user"
         or m.get("hidden")
-        or is_continuation_message(m)
+        or not_owner_speech_label(m) is not None
       ):
         continue
       ts = m.get("ts")
@@ -566,15 +564,16 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
       content = _without_write_frames(content)
       if not content.strip():
         continue
-    if is_continuation_message(msg):
-      speaker = continuation_actor_label(msg)
-    else:
-      speaker = "User" if role == "user" else "Assistant"
-    entries.append((msg, f"{speaker}: {content.strip()}"))
+    speaker = not_owner_speech_label(msg) or (
+      "User" if role == "user" else "Assistant"
+    )
+    # Every entry is recalled text inside one tagged block; none may end it.
+    content = as_block_data(content.strip(), "resumed_context")
+    entries.append((msg, f"{speaker}: {content}"))
   task = None
   if (
     keep_task and entries and entries[0][0].get("role") == "user"
-    and not is_continuation_message(entries[0][0])
+    and not_owner_speech_label(entries[0][0]) is None
   ):
     task = entries.pop(0)[1]
   budget = _RESUME_CONTEXT_CHAR_BUDGET - len(task or "")

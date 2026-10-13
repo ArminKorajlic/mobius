@@ -106,9 +106,16 @@ export function mobiusChatCommand(text) {
  * Why `command` cannot run as typed, or null when it can. `/context` opens
  * the context breakdown and takes no text: running it anyway would silently
  * discard the trailing words, so the composer keeps them and shows this.
+ * A command typed in full skips the menu, so the menu's provider rule is
+ * enforced here too: `/btw` on a Codex chat is refused before any request.
  */
-export function chatCommandRejection(command) {
-  if (command?.action === 'context' && command.argument) {
+export function chatCommandRejection(command, provider) {
+  if (!command) return null
+  const entry = SLASH_COMMANDS.find((candidate) => candidate.name === command.action)
+  if (entry && !slashCommandIsAvailable(entry, provider)) {
+    return `‘${command.name}’ isn’t available here. ${slashCommandUnavailableReason(entry, provider)} Your message stays in the box.`
+  }
+  if (command.action === 'context' && command.argument) {
     return '‘/context’ takes no text after it. Your message stays in the box.'
   }
   return null

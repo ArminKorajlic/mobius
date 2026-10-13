@@ -4,14 +4,15 @@
  * Give a just-created chat another chat's provider and model, the way the
  * model picker saves them, before anything is sent in it.
  *
- * Resolves true when there was nothing to copy or the copy was saved
- * (`onSaved` receives the server's reply, so a cached first paint can show
- * the copied model). Resolves false after telling the owner when it failed:
- * callers then leave a first message unsent instead of sending it on a model
- * the owner did not choose.
+ * Resolves `{ ok: true, saved }` when there was nothing to copy (`saved` is
+ * null) or the copy was saved (`saved` is the server's reply, also handed to
+ * `onSaved` so a cached first paint can show the copied model). Resolves
+ * `{ ok: false }` after telling the owner when it failed: callers then leave a
+ * first message unsent instead of sending it on a model the owner did not
+ * choose.
  */
 export async function copyChatSettings({ updateChat, onSaved, notify, recordError }, chatId, settings) {
-  if (!settings) return true
+  if (!settings) return { ok: true, saved: null }
   try {
     const response = await updateChat(chatId, {
       ...(settings.provider ? { provider: settings.provider } : {}),
@@ -20,7 +21,7 @@ export async function copyChatSettings({ updateChat, onSaved, notify, recordErro
     if (response.ok) {
       const saved = await response.json().catch(() => null)
       if (saved) onSaved?.(chatId, saved)
-      return true
+      return { ok: true, saved }
     }
   } catch (error) {
     recordError?.('new-chat-copy-settings', error)
@@ -28,7 +29,18 @@ export async function copyChatSettings({ updateChat, onSaved, notify, recordErro
   notify("The new chat couldn't take this chat's model. Check the model, then send.", {
     variant: 'error',
   })
-  return false
+  return { ok: false, saved: null }
+}
+
+/** `chat` as a settings copy left it: the saved provider, model and selection. */
+export function withCopiedSettings(chat, saved) {
+  if (!chat || !saved) return chat
+  return {
+    ...chat,
+    provider: saved.provider ?? chat.provider,
+    agent_settings_json: saved.agent_settings_json ?? chat.agent_settings_json,
+    effective: saved.effective ?? chat.effective,
+  }
 }
 
 /**

@@ -15,7 +15,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import signal
 import sys
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app import models
+from app.prompt_blocks import as_block_data
 
 log = logging.getLogger(__name__)
 
@@ -255,18 +255,8 @@ def side_question_row_content(question: str, answer: str) -> str:
 
 
 def _as_block_data(text: str) -> str:
-  """Neutralize the block's own delimiters inside recalled text.
-
-  The answer is model output, so it could contain a literal
-  ``</side_questions>`` that would end the block early and let the rest read
-  as owner prose. Escaping only the block's exact tags keeps every other
-  character — code, markup, markdown — untouched.
-  """
-  return re.sub(
-    r"</?side_questions>",
-    lambda match: match.group(0).replace("<", "&lt;"),
-    text,
-  )
+  """Recalled text that cannot close the ``<side_questions>`` block early."""
+  return as_block_data(text, "side_questions")
 
 
 def owed_side_questions_context(rows: list[dict]) -> str:

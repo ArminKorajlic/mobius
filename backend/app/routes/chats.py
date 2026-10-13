@@ -2314,6 +2314,11 @@ def get_chat_context_sizes(
   downloads the prompt texts. No model is called. The panel takes the total
   and the window from the chat's usage reading and shows the remainder as the
   conversation plus the provider's own instructions and tools.
+
+  The sizes describe what Möbius would assemble now, not a replay of what the
+  session received: one-time first-turn injections are not re-counted, and a
+  part that changed since (a new skill, a fresh summary) shows its current
+  size. They are estimates for seeing what dominates, not an audit.
   """
   from app.agent_context import assemble_agent_context, context_part_sizes
 

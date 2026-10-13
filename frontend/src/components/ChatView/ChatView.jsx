@@ -4145,7 +4145,7 @@ export default function ChatView({
   function dispatchMobiusChatCommand(composed) {
     const command = mobiusChatCommand(composed)
     if (!command) return false
-    const rejection = chatCommandRejection(command)
+    const rejection = chatCommandRejection(command, chatInfo?.provider)
     if (rejection) {
       // The command is consumed but nothing runs; the typed text stays.
       setSendFailure(rejection)

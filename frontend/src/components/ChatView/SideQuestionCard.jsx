@@ -52,7 +52,7 @@ export default function SideQuestionCard({ sideQuestion, onAdd, onClose, onRetry
               {status === 'adding' ? 'Adding…' : 'Add to chat'}
             </button>
           )}
-          {status === 'failed' && (
+          {status === 'failed' && sideQuestion.retryable !== false && (
             <button
               type="button"
               className="side-question__button side-question__button--primary"

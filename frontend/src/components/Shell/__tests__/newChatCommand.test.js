@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { copyChatSettings, startChatFromCommand } from '../newChatCommand.js'
+import { copyChatSettings, startChatFromCommand, withCopiedSettings } from '../newChatCommand.js'
 
 const settings = {
   provider: 'claude',
@@ -91,7 +91,8 @@ test('copying settings saves provider and model and hands the reply to the cache
     onSaved: (chatId, reply) => saved.push({ chatId, reply }),
     notify: () => assert.fail('no notice on success'),
   }, 'new-chat', settings)
-  assert.equal(ok, true)
+  assert.equal(ok.ok, true)
+  assert.equal(ok.saved.agent_settings_json.model, 'claude-haiku-5-5')
   assert.deepEqual(requests, [{
     chatId: 'new-chat',
     body: { provider: 'claude', agent_settings_json: settings.agentSettings },
@@ -105,12 +106,12 @@ test('a failed settings copy is reported so the first message is not sent', asyn
     updateChat: async () => new Response('{}', { status: 422 }),
     notify: message => notices.push(message),
   }, 'new-chat', settings)
-  assert.equal(rejected, false)
+  assert.deepEqual(rejected, { ok: false, saved: null })
   const thrown = await copyChatSettings({
     updateChat: async () => { throw new TypeError('network') },
     notify: message => notices.push(message),
   }, 'new-chat', settings)
-  assert.equal(thrown, false)
+  assert.deepEqual(thrown, { ok: false, saved: null })
   assert.equal(notices.length, 2)
 })
 
@@ -119,5 +120,14 @@ test('nothing to copy needs no request', async () => {
     updateChat: () => assert.fail('no request without settings'),
     notify: () => assert.fail('no notice'),
   }, 'new-chat', null)
-  assert.equal(ok, true)
+  assert.deepEqual(ok, { ok: true, saved: null })
+})
+
+test('the opened chat carries the copied provider and model, not the creation record', () => {
+  const created = { id: 'p-1', title: 'New chat', provider: 'codex', agent_settings_json: { model: 'gpt-6' } }
+  const saved = { provider: 'claude', agent_settings_json: settings.agentSettings }
+  assert.deepEqual(withCopiedSettings(created, saved), {
+    ...created, provider: 'claude', agent_settings_json: settings.agentSettings, effective: undefined,
+  })
+  assert.equal(withCopiedSettings(created, null), created, 'nothing copied leaves the record as created')
 })

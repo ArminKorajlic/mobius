@@ -193,12 +193,24 @@ test('/context and /btw are chat actions; /btw carries its question', () => {
 test('/context with trailing text is rejected with an explanation, not discarded', () => {
   const command = mobiusChatCommand('/context why is this full?')
   assert.equal(command.action, 'context')
-  assert.match(chatCommandRejection(command), /takes no text/,
+  assert.match(chatCommandRejection(command, 'claude'), /takes no text/,
     'running it anyway would silently discard the trailing words')
-  assert.equal(chatCommandRejection(mobiusChatCommand('/context')), null)
-  assert.equal(chatCommandRejection(mobiusChatCommand('/btw why is this full?')), null,
+  assert.equal(chatCommandRejection(mobiusChatCommand('/context'), 'claude'), null)
+  assert.equal(chatCommandRejection(mobiusChatCommand('/btw why is this full?'), 'claude'), null,
     'commands that take text keep taking it')
   assert.equal(chatCommandRejection(null), null)
+})
+
+test('a command typed in full is refused where the menu would mark it unavailable', () => {
+  const btw = mobiusChatCommand('/btw what runs?')
+  assert.match(chatCommandRejection(btw, 'codex'), /‘\/btw’ isn’t available here\. Available in Claude chats\./,
+    'a hand-typed /btw on a Codex chat must not reach a server that refuses it')
+  assert.match(chatCommandRejection(btw, undefined), /after this chat finishes loading/)
+  assert.equal(chatCommandRejection(btw, 'claude'), null)
+  for (const text of ['/compact', '/new', '/clear', '/context']) {
+    assert.equal(chatCommandRejection(mobiusChatCommand(text), 'codex'), null,
+      `${text} runs on every provider`)
+  }
 })
 
 test('typing an alias offers its command under the alias and accepting keeps it', () => {

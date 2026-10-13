@@ -14,7 +14,20 @@ export function sideQuestionFailure(error) {
 }
 
 /**
- * `sideQuestion` is null or `{ question, status, answer, provider, error }`,
+ * Whether asking the same question again could succeed. A refusal of the
+ * request itself (4xx: wrong provider, bad text, gone) answers the same way
+ * every time, so the card offers no "Try again" for it. "Not yet" states
+ * clear on their own — 409 (no reply to answer from yet, another side
+ * question running), 408 and 429 — and so do server and network failures.
+ */
+export function sideQuestionRetryable(error) {
+  const status = error?.status
+  if (typeof status !== 'number' || status < 400 || status >= 500) return true
+  return status === 408 || status === 409 || status === 429
+}
+
+/**
+ * `sideQuestion` is null or `{ question, status, answer, provider, error, retryable }`,
  * where status is `asking`, `answered`, `adding` or `failed`. Only the latest
  * question owns the card, and closing it, asking again, changing chats or
  * unmounting ABORTS an in-flight ask, so the server can end the hidden
@@ -78,7 +91,11 @@ export default function useSideQuestion({ chatId, onAdded }) {
     } catch (error) {
       if (!owns()) return
       setSideQuestion({
-        request, question, status: 'failed', error: sideQuestionFailure(error),
+        request,
+        question,
+        status: 'failed',
+        error: sideQuestionFailure(error),
+        retryable: sideQuestionRetryable(error),
       })
     }
   }, [chatId])

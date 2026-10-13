@@ -63,6 +63,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import chat_archive, models, schemas, transcript_rows
 from app.goals import admit_goal
 from app.chat_titles import apply_generated_title, first_message_title
+from app.continuations import SIDE_QUESTION_MESSAGE_KIND
 from app.json_safety import json_safe
 from app.upload_lifecycle import claim_uploads, release_uploads
 from app.events import (
@@ -2919,7 +2920,7 @@ class ChatWriterActor:
       body = transcript_rows.at(db, chat, seq)
       if (
         isinstance(body, dict)
-        and body.get("kind") == "side_question"
+        and body.get("kind") == SIDE_QUESTION_MESSAGE_KIND
         and body.get("delivered_to_agent") is not True
       ):
         transcript_rows.update_at(
@@ -2945,7 +2946,7 @@ class ChatWriterActor:
     from app.side_questions import side_question_row_content
     row = {
       "role": "user",
-      "kind": "side_question",
+      "kind": SIDE_QUESTION_MESSAGE_KIND,
       "content": side_question_row_content(cmd.question, cmd.answer),
       "side_question": {
         "question": cmd.question,

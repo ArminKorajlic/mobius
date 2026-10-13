@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { api } from '../../../../api/client.js'
-import useSideQuestion, { sideQuestionFailure } from '../useSideQuestion.js'
+import useSideQuestion, { sideQuestionFailure, sideQuestionRetryable } from '../useSideQuestion.js'
 import { renderHook } from './react-hook-shim.mjs'
 
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve() }
@@ -163,6 +163,7 @@ test('the server says why a question could not be answered, and Try again asks a
   await asking
   assert.equal(hook.result.current.sideQuestion.status, 'failed')
   assert.match(hook.result.current.sideQuestion.error, /nothing to answer from yet/)
+  assert.equal(hook.result.current.sideQuestion.retryable, true, 'a first reply clears this refusal')
   hook.result.current.retry()
   assert.equal(asks.length, 2)
   assert.equal(asks[1].question, 'what runs?')
@@ -183,4 +184,22 @@ test('transport failures read as connection or time problems', () => {
   timeout.name = 'TimeoutError'
   assert.match(sideQuestionFailure(timeout), /took too long/)
   assert.match(sideQuestionFailure(new TypeError('Failed to fetch')), /Check your connection/)
+})
+
+test('a refused request offers no Try again; a later or failed one does', async t => {
+  const { hook, asks } = setup(t)
+  const asking = hook.result.current.ask('what runs?')
+  asks[0].resolve(Response.json(
+    { detail: 'Side questions work in Claude chats for now.' }, { status: 422 },
+  ))
+  await asking
+  assert.equal(hook.result.current.sideQuestion.status, 'failed')
+  assert.match(hook.result.current.sideQuestion.error, /Claude chats/)
+  assert.equal(hook.result.current.sideQuestion.retryable, false,
+    'asking the same chat again would be refused the same way')
+
+  const status = code => Object.assign(new Error('x'), { status: code })
+  for (const code of [400, 401, 403, 404, 422]) assert.equal(sideQuestionRetryable(status(code)), false, `${code}`)
+  for (const code of [408, 409, 429, 500, 502, 504]) assert.equal(sideQuestionRetryable(status(code)), true, `${code}`)
+  assert.equal(sideQuestionRetryable(new TypeError('Failed to fetch')), true)
 })

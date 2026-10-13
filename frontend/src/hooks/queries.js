@@ -238,16 +238,23 @@ async function fetchChatContextSizes(chatId, { signal } = {}) {
   return jsonOrThrow(res, 'chat context sizes fetch failed:')
 }
 
-// Read when /context opens; the parts change slowly (a new skill, a fresh
-// chat summary), so a reopen within a minute reuses the answer.
-function useChatContextSizesQuery(chatId, { enabled = true } = {}) {
-  return useQuery({
+// Measured each time /context opens. A compaction can finish anywhere — this
+// composer, a resumed or automatic run, another device — and only the first
+// can invalidate this cache, so opening the panel always re-reads; the last
+// answer shows meanwhile. A compaction while a panel is open invalidates it
+// (ChatView's onCompacted).
+function chatContextSizesQueryOptions(chatId, { enabled = true } = {}) {
+  return {
     queryKey: chatContextSizesKey(chatId),
     queryFn: context => fetchChatContextSizes(chatId, context),
     enabled: enabled && Boolean(chatId),
-    staleTime: 60_000,
+    refetchOnMount: 'always',
     retry: 0,
-  })
+  }
+}
+
+function useChatContextSizesQuery(chatId, options) {
+  return useQuery(chatContextSizesQueryOptions(chatId, options))
 }
 
 function useChatCurrentUsageQuery(
@@ -674,6 +681,7 @@ export const chatQueries = {
   contextSizes: {
     key: chatContextSizesKey,
     fetch: fetchChatContextSizes,
+    options: chatContextSizesQueryOptions,
     useQuery: useChatContextSizesQuery,
   },
   currentUsage: {

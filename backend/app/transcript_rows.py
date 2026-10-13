@@ -41,6 +41,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session, object_session
 
 from app import models
+from app.continuations import SIDE_QUESTION_MESSAGE_KIND
 
 EDIT_PREVIEW = 1
 HIDDEN = 8
@@ -93,7 +94,7 @@ def attributes(body) -> dict:
       flags |= EDIT_PREVIEW
     if _is_goal_tool(block):
       flags |= GOAL_COMPLETION
-  if body.get("kind") == "side_question" and body.get("delivered_to_agent") is not True:
+  if body.get("kind") == SIDE_QUESTION_MESSAGE_KIND and body.get("delivered_to_agent") is not True:
     flags |= SIDE_QUESTION_OWED
   role = body.get("role") if isinstance(body.get("role"), str) else None
   content = body.get("content")

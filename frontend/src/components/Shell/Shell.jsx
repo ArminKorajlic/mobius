@@ -14,6 +14,7 @@ import {
 import Drawer from '../Drawer/Drawer.jsx'
 import {
   copyChatSettings as copyNewChatSettings,
+  withCopiedSettings,
   startChatFromCommand as startNewChatFromCommand,
 } from './newChatCommand.js'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -1666,11 +1667,13 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       title,
       recovery_request_id: crypto.randomUUID(),
     })
-    const chat = await jsonOrThrow(response, 'Project chat creation failed:')
+    const created = await jsonOrThrow(response, 'Project chat creation failed:')
     // The copy lands before the chat opens, so an auto-sent first message
-    // already runs on the copied model.
-    const settingsCopied = await copyChatSettings(chat.id, settings)
-    const sendsPrompt = !!prompt && autoSend && settingsCopied
+    // already runs on the copied model, and every cache below holds the chat
+    // as the copy saved it rather than the pre-copy creation record.
+    const copy = await copyChatSettings(created.id, settings)
+    const chat = withCopiedSettings(created, copy.saved)
+    const sendsPrompt = !!prompt && autoSend && copy.ok
     knownExistingOffListChatIdsRef.current.add(String(chat.id))
     queryClient.setQueryData(projectQueries.keys.chats(project.id), current => [
       chat,
@@ -1711,16 +1714,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       onSaved: (chatId, saved) => queryClient.setQueryData(
         chatMessagesQueryKey(chatId),
         current => (current?.chatInfo
-          ? {
-            ...current,
-            chatInfo: {
-              ...current.chatInfo,
-              provider: saved.provider ?? current.chatInfo.provider,
-              agent_settings_json: saved.agent_settings_json
-                ?? current.chatInfo.agent_settings_json,
-              effective: saved.effective ?? current.chatInfo.effective,
-            },
-          }
+          ? { ...current, chatInfo: withCopiedSettings(current.chatInfo, saved) }
           : current),
       ),
       notify: notifyShell,
@@ -4206,7 +4200,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       closeDrawer()
       return null
     }
-    const settingsCopied = await copyChatSettings(chatId, settings)
+    const { ok: settingsCopied } = await copyChatSettings(chatId, settings)
 
     const changesRoute = activeViewRef.current !== 'chat'
       || String(activeChatIdRef.current) !== String(chatId)
