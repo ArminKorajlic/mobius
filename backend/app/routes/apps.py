@@ -31,7 +31,7 @@ from app import (
   source_dirs, workspace_files,
 )
 from app.manifest_identity import (
-  requested_manifest_source, same_permanent_package, stored_manifest_fetch_url,
+  requested_manifest_source, stored_manifest_fetch_url,
 )
 from app.app_identity import (
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
@@ -834,9 +834,9 @@ async def install_app(
   # routes/apps.py at module top.
   from app import install
 
-  # Git transfers finish before the lifecycle lock, so one slow repository
+  # Network transfers finish before the lifecycle lock, so one slow package
   # never holds up other apps' installs, updates or uninstalls.
-  staged_clone = None
+  prepared = None
   try:
     if body.update_app_id is not None and body.reviewed_upstream_commit is not None:
       reviewed = db.get(models.App, body.update_app_id)
@@ -855,18 +855,11 @@ async def install_app(
             code="update_changed",
             failure="The reviewed Git update is no longer available.",
           ) from exc
-    elif body.update_app_id is None and body.manifest_url is not None:
-      try:
-        staged_clone = await install.stage_package_clone(body.manifest_url, db=db)
-      except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
-        raise install.git_source_error(
-          "Nothing was installed.",
-          exc,
-          code="git_install_unavailable",
-          failure="The app's Git repository could not be cloned or verified; "
-          "retry when its source is available.",
-          retryable=True,
-        ) from exc
+    elif body.update_app_id is None:
+      prepared = await install.prepare_package(
+        body.manifest_url, body.manifest, body.raw_base,
+        reviewed_capability_digest=body.reviewed_capability_digest, db=db,
+      )
     # Serialize the whole install against any concurrent uninstall — both are
     # app-lifecycle operations over the same /data/apps trees, and letting them
     # overlap lets one delete what the other just wrote
@@ -882,10 +875,11 @@ async def install_app(
         reviewed_source_digest=body.reviewed_source_digest,
         reviewed_app_id=body.update_app_id,
         reviewed_upstream_commit=body.reviewed_upstream_commit,
-        staged_clone=staged_clone,
+        prepared=prepared,
       )
   finally:
-    await asyncio.to_thread(install.discard_staged, staged_clone)
+    if prepared is not None:
+      await asyncio.to_thread(install.discard_staged, prepared.staged_clone)
   app = result.app
   mode = result.mode
   warnings = result.warnings
@@ -1403,12 +1397,12 @@ def _update_candidate_matches_installed(
   """Accept the installed package identity or its reviewed predecessor.
 
   A permanent `package_id` binds the package across manifest id renames, as
-  it does for install.
+  it does for install, so a row that has one matches only that package.
   """
   from app import install
 
-  if same_permanent_package(candidate_manifest, installed_package_id):
-    return True
+  if installed_package_id:
+    return candidate_manifest.get("package_id") == installed_package_id
 
   predecessor_source, _ = install._reviewed_predecessor_source(
     candidate_manifest, candidate_manifest_url,
@@ -2489,6 +2483,9 @@ def mark_app_opened(
 
 class AppActivitySeenRequest(BaseModel):
   activity_version: int = Field(ge=1, le=(2**63 - 1))
+  # Optional so a shell loaded before lifetime-bound acknowledgements keeps
+  # working until it reloads; without it the write is bound to the live app.
+  app_created_at: str | None = None
 
 
 @router.post(
@@ -2503,9 +2500,17 @@ def mark_app_activity_seen(
   _: models.Owner = Depends(get_current_owner),
 ):
   """Clear an app's durable activity dot when the owner opens the app."""
-  live_app_or_404(db, app_id)
-  app_activity.mark_seen(db, app_id, body.activity_version)
+  app = live_app_or_404(db, app_id)
+  app_created_at = app.created_at.isoformat()
+  if body.app_created_at is not None and body.app_created_at != app_created_at:
+    raise HTTPException(409, "App identity changed before activity acknowledgement")
+  seen_version = app_activity.mark_seen(db, app_id, body.activity_version, app.created_at)
   db.commit()
+  if seen_version is not None:
+    get_system_broadcast().publish({
+      "type": "app_activity_seen", "appId": str(app_id),
+      "appCreatedAt": app_created_at, "seenThroughVersion": seen_version,
+    })
   return Response(status_code=204)
 
 
